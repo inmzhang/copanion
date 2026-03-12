@@ -258,6 +258,7 @@ impl App {
             .iter()
             .copied()
             .find(|line| *line > self.cursor_line)
+            .or_else(|| self.view_metrics.annotation_lines.first().copied())
         {
             self.cursor_line = line;
             self.ensure_cursor_visible();
@@ -273,6 +274,7 @@ impl App {
             .copied()
             .rev()
             .find(|line| *line < self.cursor_line)
+            .or_else(|| self.view_metrics.annotation_lines.last().copied())
         {
             self.cursor_line = line;
             self.ensure_cursor_visible();
@@ -1497,5 +1499,39 @@ mod tests {
         let draft = app.draft.as_ref().expect("question draft should exist");
         assert_eq!(draft.anchor, Anchor::new(1, Some(3)));
         assert_eq!(draft.related_note_ids, vec![note_id]);
+    }
+
+    #[test]
+    fn next_annotation_wraps_back_to_the_head() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\nfour\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.view_metrics.annotation_lines = vec![2, 4];
+        app.cursor_line = 4;
+        app.jump_to_next_annotation();
+        assert_eq!(app.cursor_line, 2);
+    }
+
+    #[test]
+    fn previous_annotation_wraps_back_to_the_tail() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\nfour\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.view_metrics.annotation_lines = vec![2, 4];
+        app.cursor_line = 2;
+        app.jump_to_previous_annotation();
+        assert_eq!(app.cursor_line, 4);
     }
 }
