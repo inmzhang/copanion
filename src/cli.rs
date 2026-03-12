@@ -36,6 +36,9 @@ pub struct Cli {
     /// Export only the open questions that still need an agent reply.
     #[arg(long)]
     export: bool,
+    /// Open directly in git diff mode with commit/uncommitted selection.
+    #[arg(long, conflicts_with_all = ["export", "apply_agent_response"])]
+    diff: bool,
     /// Print exports to stdout instead of copying them to the clipboard.
     #[arg(long)]
     stdout: bool,
@@ -123,7 +126,7 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    tui::run(&packet_path, cli.stdout)
+    tui::run(&packet_path, cli.stdout, cli.diff)
 }
 
 fn resolve_theme(cli_theme: Option<ThemeName>, config: Option<&config::AppConfig>) -> ThemeName {

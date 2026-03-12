@@ -18,11 +18,15 @@ use uuid::Uuid;
 
 use crate::storage;
 
-use self::app::{App, FocusPane, InputMode};
+use self::app::{App, BrowserMode, FocusPane, InputMode};
 
-pub fn run(packet_path: &Path, output_to_stdout: bool) -> Result<()> {
+pub fn run(packet_path: &Path, output_to_stdout: bool, diff_mode: bool) -> Result<()> {
     let packet = storage::read_packet(packet_path)?;
-    let mut app = App::load(packet_path.to_path_buf(), packet, output_to_stdout)?;
+    let mut app = if diff_mode {
+        App::load_diff(packet_path.to_path_buf(), packet, output_to_stdout)?
+    } else {
+        App::load(packet_path.to_path_buf(), packet, output_to_stdout)?
+    };
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -68,13 +72,22 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                         if pending_d {
                             pending_d = false;
                             if is_plain_char(key, 'd') {
-                                match app.focus {
-                                    FocusPane::Files => {
-                                        app.delete_current_file();
+                                if app.browser_mode == BrowserMode::Source {
+                                    match app.focus {
+                                        FocusPane::Files => {
+                                            app.delete_current_file();
+                                        }
+                                        FocusPane::Source => {
+                                            app.delete_annotation_at_cursor();
+                                        }
                                     }
-                                    FocusPane::Source => {
-                                        app.delete_annotation_at_cursor();
-                                    }
+                                } else if app.focus == FocusPane::Source {
+                                    app.delete_annotation_at_cursor();
+                                } else {
+                                    app.message = Some(
+                                        "dd only deletes annotations from the diff view"
+                                            .to_string(),
+                                    );
                                 }
                                 continue;
                             }
@@ -82,15 +95,23 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
 
                         if is_plain_char(key, 'd') {
                             pending_d = true;
-                            app.message = Some(match app.focus {
-                                FocusPane::Files => {
-                                    "press d again to remove the selected file from this packet"
+                            app.message = Some(if app.browser_mode == BrowserMode::Source {
+                                match app.focus {
+                                    FocusPane::Files => {
+                                        "press d again to remove the selected file from this packet"
+                                    }
+                                    FocusPane::Source => {
+                                        "press d again to delete the note or question at the current line"
+                                    }
                                 }
-                                FocusPane::Source => {
-                                    "press d again to delete the note or question at the current line"
-                                }
-                            }
-                            .to_string());
+                                .to_string()
+                            } else if app.focus == FocusPane::Source {
+                                "press d again to delete the note or comment thread at the current line"
+                                    .to_string()
+                            } else {
+                                "dd is only available in the diff view, not the changed-files sidebar"
+                                    .to_string()
+                            });
                             continue;
                         }
                     } else {
@@ -154,10 +175,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::FilePicker => handle_file_picker_mode(app, key),
         InputMode::Search => handle_search_mode(app, key),
         InputMode::Help => handle_help_mode(app, key),
+        InputMode::CommitSelect => handle_commit_select_mode(app, key),
     }
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.is_diff_mode() {
+        return handle_diff_normal_mode(app, key);
+    }
     app.clear_message();
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
@@ -194,20 +219,82 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::PageDown => app.page_down(),
         KeyCode::PageUp => app.page_up(),
         KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
-        KeyCode::Char('a') => app.begin_question(),
-        KeyCode::Char('c') => app.begin_question_follow_up(),
+        KeyCode::Char('a') => app.begin_question_or_follow_up(),
+        KeyCode::Char('c') => {
+            app.resolve_current_question();
+        }
         KeyCode::Char('o') => {
             app.reopen_current_question();
         }
         KeyCode::Char('n') => app.begin_note(),
         KeyCode::Char('i') => app.begin_edit_current_annotation(false),
         KeyCode::Char('I') => app.begin_edit_current_annotation(true),
-        KeyCode::Char('r') => {
-            app.resolve_current_question();
-        }
         KeyCode::Char('f') => app.begin_file_picker()?,
         KeyCode::Char('/') => app.begin_search(),
         KeyCode::Char('R') => app.reload_sources()?,
+        KeyCode::Char('s') => app.save()?,
+        KeyCode::Char('y') => app.export_questions()?,
+        KeyCode::Char('x') => app.save_and_quit()?,
+        KeyCode::Char('q') => app.request_quit(),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_diff_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    app.clear_message();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => {
+                app.half_page_down();
+                return Ok(());
+            }
+            KeyCode::Char('u') => {
+                app.half_page_up();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    match key.code {
+        KeyCode::Tab => app.toggle_focus(),
+        KeyCode::Char('?') => app.input_mode = InputMode::Help,
+        KeyCode::Char('j') | KeyCode::Down => match app.focus {
+            FocusPane::Files => app.move_file(1),
+            FocusPane::Source => app.move_cursor(1),
+        },
+        KeyCode::Char('k') | KeyCode::Up => match app.focus {
+            FocusPane::Files => app.move_file(-1),
+            FocusPane::Source => app.move_cursor(-1),
+        },
+        KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Source => app.move_file(-1),
+        KeyCode::Char('l') | KeyCode::Right if app.focus == FocusPane::Source => app.move_file(1),
+        KeyCode::Enter if app.focus == FocusPane::Files => app.focus = FocusPane::Source,
+        KeyCode::Enter | KeyCode::Char(' ') if app.focus == FocusPane::Source => {
+            app.toggle_diff_gap_at_cursor()?
+        }
+        KeyCode::Char('g') => app.go_to_first_line(),
+        KeyCode::Char('G') => app.go_to_last_line(),
+        KeyCode::Char('[') => app.jump_to_previous_annotation(),
+        KeyCode::Char(']') => app.jump_to_next_annotation(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
+        KeyCode::Char('a') => app.begin_question_or_follow_up(),
+        KeyCode::Char('c') => {
+            app.resolve_current_question();
+        }
+        KeyCode::Char('o') => {
+            app.reopen_current_question();
+        }
+        KeyCode::Char('n') => app.begin_note(),
+        KeyCode::Char('i') => app.begin_edit_current_annotation(false),
+        KeyCode::Char('I') => app.begin_edit_current_annotation(true),
+        KeyCode::Char('m') => app.reopen_diff_commit_selector()?,
+        KeyCode::Char('R') => app.reload_sources()?,
+        KeyCode::Char('r') => app.mark_current_diff_file_reviewed_and_next(),
+        KeyCode::Char('/') => app.begin_search(),
         KeyCode::Char('s') => app.save()?,
         KeyCode::Char('y') => app.export_questions()?,
         KeyCode::Char('x') => app.save_and_quit()?,
@@ -243,7 +330,7 @@ fn handle_visual_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::PageUp => app.page_up(),
         KeyCode::Char('[') => app.jump_to_previous_annotation(),
         KeyCode::Char(']') => app.jump_to_next_annotation(),
-        KeyCode::Char('a') => app.begin_question(),
+        KeyCode::Char('a') => app.begin_question_or_follow_up(),
         KeyCode::Char('n') => app.begin_note(),
         KeyCode::Char('q') => app.request_quit(),
         _ => {}
@@ -341,17 +428,27 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    if app.is_diff_mode() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                app.input_mode = InputMode::Normal
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
             app.input_mode = InputMode::Normal
         }
         KeyCode::Char('a') => {
             app.input_mode = InputMode::Normal;
-            app.begin_question();
+            app.begin_question_or_follow_up();
         }
         KeyCode::Char('c') => {
             app.input_mode = InputMode::Normal;
-            app.begin_question_follow_up();
+            app.resolve_current_question();
         }
         KeyCode::Char('o') => {
             app.input_mode = InputMode::Normal;
@@ -372,10 +469,6 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('f') => {
             app.input_mode = InputMode::Normal;
             app.begin_file_picker()?;
-        }
-        KeyCode::Char('r') => {
-            app.input_mode = InputMode::Normal;
-            app.resolve_current_question();
         }
         KeyCode::Char('R') => {
             app.input_mode = InputMode::Normal;
@@ -400,6 +493,18 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
 
+    Ok(())
+}
+
+fn handle_commit_select_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.request_quit(),
+        KeyCode::Char('j') | KeyCode::Down => app.move_diff_commit_cursor(1),
+        KeyCode::Char('k') | KeyCode::Up => app.move_diff_commit_cursor(-1),
+        KeyCode::Char(' ') => app.toggle_diff_commit_selection(),
+        KeyCode::Enter => app.confirm_diff_commit_selection()?,
+        _ => {}
+    }
     Ok(())
 }
 

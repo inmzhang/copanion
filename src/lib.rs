@@ -2,6 +2,7 @@ pub mod answer_plan;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
+pub mod diff;
 pub mod export;
 pub mod model;
 pub mod storage;

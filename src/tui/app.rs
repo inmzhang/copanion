@@ -1,15 +1,16 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use ignore::WalkBuilder;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::clipboard;
+use crate::diff::{CommitInfo, DEFAULT_COMMIT_LIMIT, DiffFile, DiffSelection, GitDiffLoader};
 use crate::export;
 use crate::model::{
     Anchor, Note, NoteKind, NoteSource, Packet, Question, QuestionMessageRole, QuestionStatus,
@@ -31,6 +32,7 @@ pub enum InputMode {
     FilePicker,
     Search,
     Help,
+    CommitSelect,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -106,12 +108,75 @@ pub struct ViewMetrics {
     pub viewport_height: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DiffViewMetrics {
+    pub file_rows: Vec<usize>,
+    pub annotation_rows: Vec<usize>,
+    pub rows: Vec<DiffRow>,
+    pub total_rows: usize,
+    pub viewport_height: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadedFile {
     pub path: String,
     pub lines: Vec<String>,
     pub highlighted_lines: Vec<syntax::StyledSegments>,
     pub load_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BrowserMode {
+    Source,
+    Diff,
+}
+
+pub struct DiffBrowserState {
+    pub loader: GitDiffLoader,
+    pub commit_options: Vec<CommitInfo>,
+    pub active_review_entries: Vec<CommitInfo>,
+    pub commit_cursor: usize,
+    pub commit_selection_range: Option<(usize, usize)>,
+    pub selection: Option<DiffSelection>,
+    pub files: Vec<DiffFile>,
+    pub current_file: usize,
+    pub cursor_row: usize,
+    pub scroll: usize,
+    pub view_metrics: DiffViewMetrics,
+    pub expanded_gaps: HashSet<GapId>,
+    pub expanded_content: HashMap<GapId, Vec<crate::diff::DiffLine>>,
+    pub reviewed_paths: BTreeSet<String>,
+    pub visual_anchor_row: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GapId {
+    pub file_idx: usize,
+    pub hunk_idx: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum DiffRow {
+    FileHeader,
+    GapExpander {
+        gap_id: GapId,
+    },
+    ExpandedContext {
+        file_idx: usize,
+        gap_id: GapId,
+        context_idx: usize,
+    },
+    HunkHeader,
+    DiffLine {
+        file_idx: usize,
+        hunk_idx: usize,
+        line_idx: usize,
+    },
+    Annotation {
+        path: String,
+        line_no: usize,
+    },
+    FileEnd,
 }
 
 pub struct App {
@@ -130,6 +195,8 @@ pub struct App {
     pub search: Option<SearchState>,
     pub visual_anchor: Option<usize>,
     pub view_metrics: ViewMetrics,
+    pub browser_mode: BrowserMode,
+    pub diff_browser: Option<DiffBrowserState>,
     pub message: Option<String>,
     pub should_quit: bool,
     pub dirty: bool,
@@ -141,9 +208,34 @@ pub struct App {
 
 impl App {
     pub fn load(packet_path: PathBuf, packet: Packet, output_to_stdout: bool) -> Result<Self> {
+        let mut app = Self::load_base(packet_path, packet, output_to_stdout);
+
+        if app.files.is_empty() {
+            app.begin_file_picker()?;
+        } else {
+            app.focus = FocusPane::Source;
+        }
+
+        Ok(app)
+    }
+
+    pub fn load_diff(packet_path: PathBuf, packet: Packet, output_to_stdout: bool) -> Result<Self> {
+        let mut app = Self::load_base(packet_path, packet, output_to_stdout);
+        let diff_browser = DiffBrowserState::new(&app.root)?;
+        app.browser_mode = BrowserMode::Diff;
+        app.focus = FocusPane::Source;
+        app.input_mode = InputMode::CommitSelect;
+        app.message = Some(
+            "select uncommitted changes or a contiguous commit range, then press Enter".to_string(),
+        );
+        app.diff_browser = Some(diff_browser);
+        Ok(app)
+    }
+
+    fn load_base(packet_path: PathBuf, packet: Packet, output_to_stdout: bool) -> Self {
         let root = PathBuf::from(&packet.workspace_root);
         let files = load_files(&root, &packet);
-        let mut app = Self {
+        Self {
             root,
             packet_path,
             packet,
@@ -159,6 +251,8 @@ impl App {
             search: None,
             visual_anchor: None,
             view_metrics: ViewMetrics::default(),
+            browser_mode: BrowserMode::Source,
+            diff_browser: None,
             message: None,
             should_quit: false,
             dirty: false,
@@ -166,19 +260,150 @@ impl App {
             quit_notice: None,
             quit_export: None,
             composer_cursor_screen_pos: None,
-        };
-
-        if app.files.is_empty() {
-            app.begin_file_picker()?;
-        } else {
-            app.focus = FocusPane::Source;
         }
-
-        Ok(app)
     }
 
     pub fn clear_message(&mut self) {
         self.message = None;
+    }
+
+    pub fn is_diff_mode(&self) -> bool {
+        self.browser_mode == BrowserMode::Diff
+    }
+
+    pub fn current_diff_file(&self) -> Option<&DiffFile> {
+        let browser = self.diff_browser.as_ref()?;
+        browser.files.get(browser.current_file)
+    }
+
+    pub fn current_diff_path(&self) -> Option<&str> {
+        self.current_diff_file().map(DiffFile::display_path)
+    }
+
+    pub fn current_diff_selection(&self) -> Option<&DiffSelection> {
+        self.diff_browser
+            .as_ref()
+            .and_then(|browser| browser.selection.as_ref())
+    }
+
+    pub fn diff_files(&self) -> &[DiffFile] {
+        self.diff_browser
+            .as_ref()
+            .map(|browser| browser.files.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn current_diff_row(&self) -> Option<&DiffRow> {
+        let browser = self.diff_browser.as_ref()?;
+        browser.view_metrics.rows.get(browser.cursor_row)
+    }
+
+    pub fn is_current_diff_file_reviewed(&self, path: &str) -> bool {
+        self.diff_browser
+            .as_ref()
+            .map(|browser| browser.reviewed_paths.contains(path))
+            .unwrap_or(false)
+    }
+
+    fn current_annotation_target(&self) -> Option<(String, usize)> {
+        if !self.is_diff_mode() {
+            let path = self.current_path();
+            if path.is_empty() {
+                return None;
+            }
+            return Some((path.to_string(), self.cursor_line));
+        }
+
+        self.current_diff_row()
+            .and_then(|row| self.annotation_target_for_diff_row(row))
+    }
+
+    fn selected_draft_target(&self) -> Option<(String, Anchor)> {
+        if !self.is_diff_mode() {
+            return Some((
+                self.current_path().to_string(),
+                self.visual_selection()
+                    .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+            ));
+        }
+
+        if self.input_mode == InputMode::Visual
+            && let Some((path, anchor)) = self.diff_visual_selection()
+        {
+            return Some((path, anchor));
+        }
+
+        let (path, line) = self.current_annotation_target()?;
+        Some((path, Anchor::new(line, None)))
+    }
+
+    fn annotation_target_for_diff_row(&self, row: &DiffRow) -> Option<(String, usize)> {
+        let browser = self.diff_browser.as_ref()?;
+        match row {
+            DiffRow::ExpandedContext {
+                file_idx,
+                gap_id,
+                context_idx,
+            } => {
+                let file = browser.files.get(*file_idx)?;
+                if file.new_path.is_none() {
+                    return None;
+                }
+                let line = browser
+                    .expanded_content
+                    .get(gap_id)?
+                    .get(*context_idx)?
+                    .new_lineno?;
+                Some((file.display_path().to_string(), line))
+            }
+            DiffRow::DiffLine {
+                file_idx,
+                hunk_idx,
+                line_idx,
+            } => {
+                let file = browser.files.get(*file_idx)?;
+                if file.new_path.is_none() {
+                    return None;
+                }
+                let line = file
+                    .hunks
+                    .get(*hunk_idx)?
+                    .lines
+                    .get(*line_idx)?
+                    .new_lineno?;
+                Some((file.display_path().to_string(), line))
+            }
+            DiffRow::Annotation { path, line_no } => Some((path.clone(), *line_no)),
+            _ => None,
+        }
+    }
+
+    fn diff_visual_selection(&self) -> Option<(String, Anchor)> {
+        let browser = self.diff_browser.as_ref()?;
+        let start_row = browser.visual_anchor_row?;
+        let end_row = browser.cursor_row;
+        let start =
+            self.annotation_target_for_diff_row(browser.view_metrics.rows.get(start_row)?)?;
+        let end = self.annotation_target_for_diff_row(browser.view_metrics.rows.get(end_row)?)?;
+        if start.0 != end.0 {
+            return None;
+        }
+        Some((start.0, anchor_from_lines(start.1, end.1)))
+    }
+
+    pub fn is_diff_row_in_visual_selection(&self, row: usize) -> bool {
+        if !self.is_diff_mode() || self.input_mode != InputMode::Visual {
+            return false;
+        }
+        let Some(browser) = &self.diff_browser else {
+            return false;
+        };
+        let Some(anchor_row) = browser.visual_anchor_row else {
+            return false;
+        };
+        let start = anchor_row.min(browser.cursor_row);
+        let end = anchor_row.max(browser.cursor_row);
+        row >= start && row <= end
     }
 
     pub fn active_draft_buffer_mut(&mut self) -> &mut TextBuffer {
@@ -207,7 +432,12 @@ impl App {
 
     pub fn toggle_focus(&mut self) {
         self.discard_guard = false;
-        if self.files.is_empty() {
+        let has_files = if self.is_diff_mode() {
+            !self.diff_files().is_empty()
+        } else {
+            !self.files.is_empty()
+        };
+        if !has_files {
             return;
         }
         self.focus = match self.focus {
@@ -217,6 +447,10 @@ impl App {
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
+        if self.is_diff_mode() {
+            self.move_diff_cursor(delta);
+            return;
+        }
         self.discard_guard = false;
         let max_line = self.max_source_line();
         let next = (self.cursor_line as isize + delta).clamp(1, max_line as isize) as usize;
@@ -225,18 +459,33 @@ impl App {
     }
 
     pub fn go_to_first_line(&mut self) {
+        if self.is_diff_mode() {
+            self.go_to_first_diff_row();
+            return;
+        }
         self.discard_guard = false;
         self.cursor_line = 1;
         self.ensure_cursor_visible();
     }
 
     pub fn go_to_last_line(&mut self) {
+        if self.is_diff_mode() {
+            self.go_to_last_diff_row();
+            return;
+        }
         self.discard_guard = false;
         self.cursor_line = self.max_source_line();
         self.ensure_cursor_visible();
     }
 
     fn viewport_step(&self, divisor: usize) -> isize {
+        if self.is_diff_mode() {
+            return self
+                .diff_browser
+                .as_ref()
+                .map(|browser| (browser.view_metrics.viewport_height / divisor).max(1) as isize)
+                .unwrap_or(1);
+        }
         (self.view_metrics.viewport_height / divisor).max(1) as isize
     }
 
@@ -258,6 +507,10 @@ impl App {
 
     pub fn move_file(&mut self, delta: isize) {
         self.discard_guard = false;
+        if self.is_diff_mode() {
+            self.move_diff_file(delta);
+            return;
+        }
         if self.files.is_empty() {
             return;
         }
@@ -267,6 +520,10 @@ impl App {
     }
 
     pub fn select_file(&mut self, index: usize) {
+        if self.is_diff_mode() {
+            self.select_diff_file(index);
+            return;
+        }
         self.current_file = index.min(self.files.len().saturating_sub(1));
         self.cursor_line = 1;
         self.scroll = 0;
@@ -274,6 +531,10 @@ impl App {
     }
 
     pub fn jump_to_next_annotation(&mut self) {
+        if self.is_diff_mode() {
+            self.jump_to_next_diff_annotation();
+            return;
+        }
         self.discard_guard = false;
         if let Some(line) = self
             .view_metrics
@@ -289,6 +550,10 @@ impl App {
     }
 
     pub fn jump_to_previous_annotation(&mut self) {
+        if self.is_diff_mode() {
+            self.jump_to_previous_diff_annotation();
+            return;
+        }
         self.discard_guard = false;
         if let Some(line) = self
             .view_metrics
@@ -308,35 +573,64 @@ impl App {
         self.begin_new_draft(DraftKind::Question);
     }
 
+    pub fn begin_question_or_follow_up(&mut self) {
+        if self.current_open_question_index().is_some() {
+            self.begin_question_follow_up();
+        } else {
+            self.begin_question();
+        }
+    }
+
     pub fn begin_question_follow_up(&mut self) {
-        if self.files.is_empty() {
-            self.message = Some("add a tracked file before continuing a question".to_string());
+        let has_context = if self.is_diff_mode() {
+            !self.diff_files().is_empty()
+        } else {
+            !self.files.is_empty()
+        };
+        if !has_context {
+            self.message = Some(if self.is_diff_mode() {
+                "add a tracked file before continuing a comment".to_string()
+            } else {
+                "add a tracked file before continuing a question".to_string()
+            });
             return;
         }
         let Some(index) = self.current_open_question_index() else {
-            self.message = Some(
-                "there is no open question thread on the current line to continue".to_string(),
-            );
+            self.message = Some(if self.is_diff_mode() {
+                "there is no open comment thread on the current line to continue".to_string()
+            } else {
+                "there is no open question thread on the current line to continue".to_string()
+            });
             return;
         };
         let question = &self.packet.questions[index];
+        let current_line = self
+            .current_annotation_target()
+            .map(|(_, line)| line)
+            .unwrap_or(self.cursor_line);
         self.discard_guard = false;
         self.visual_anchor = None;
+        if let Some(browser) = &mut self.diff_browser {
+            browser.visual_anchor_row = None;
+        }
         self.draft = Some(PromptDraft {
             kind: DraftKind::Question,
             target: DraftTarget::ContinueQuestion { index },
             path: question.path.clone(),
             anchor: question
                 .anchor
-                .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+                .unwrap_or_else(|| Anchor::new(current_line, None)),
             related_note_ids: question.related_note_ids.clone(),
             buffer: TextBuffer::default(),
             original_text: String::new(),
         });
         self.input_mode = InputMode::Draft;
-        self.message = Some(
-            "continue the conversation; Ctrl-S saves, Ctrl-O opens the external editor".to_string(),
-        );
+        self.message = Some(if self.is_diff_mode() {
+            "continue the comment thread; Ctrl-S saves, Ctrl-O opens the external editor"
+                .to_string()
+        } else {
+            "continue the conversation; Ctrl-S saves, Ctrl-O opens the external editor".to_string()
+        });
     }
 
     pub fn begin_note(&mut self) {
@@ -344,6 +638,29 @@ impl App {
     }
 
     pub fn enter_visual_mode(&mut self) {
+        if self.is_diff_mode() {
+            if self.current_annotation_target().is_none() {
+                self.message = Some(
+                    "move to an added, unchanged, or expanded-context line before starting a visual selection"
+                        .to_string(),
+                );
+                return;
+            }
+            let cursor_row = self
+                .diff_browser
+                .as_ref()
+                .map(|browser| browser.cursor_row)
+                .unwrap_or(0);
+            self.discard_guard = false;
+            self.focus = FocusPane::Source;
+            self.input_mode = InputMode::Visual;
+            if let Some(browser) = &mut self.diff_browser {
+                browser.visual_anchor_row = Some(cursor_row);
+            }
+            self.message =
+                Some("visual selection started; move the cursor and press a or n".to_string());
+            return;
+        }
         if self.files.is_empty() {
             self.message = Some("add a tracked file before selecting a range".to_string());
             return;
@@ -359,6 +676,9 @@ impl App {
     pub fn exit_visual_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.visual_anchor = None;
+        if let Some(browser) = &mut self.diff_browser {
+            browser.visual_anchor_row = None;
+        }
         self.message = Some("visual selection cleared".to_string());
     }
 
@@ -366,11 +686,17 @@ impl App {
         if self.input_mode != InputMode::Visual {
             return None;
         }
+        if self.is_diff_mode() {
+            return self.diff_visual_selection().map(|(_, anchor)| anchor);
+        }
         let anchor = self.visual_anchor?;
         Some(anchor_from_lines(anchor, self.cursor_line))
     }
 
     pub fn is_line_in_visual_selection(&self, line: usize) -> bool {
+        if self.is_diff_mode() {
+            return false;
+        }
         let Some(anchor) = self.visual_selection() else {
             return false;
         };
@@ -378,7 +704,12 @@ impl App {
     }
 
     pub fn begin_edit_current_annotation(&mut self, prefer_note: bool) {
-        if self.files.is_empty() {
+        let has_context = if self.is_diff_mode() {
+            !self.diff_files().is_empty()
+        } else {
+            !self.files.is_empty()
+        };
+        if !has_context {
             self.message = Some("add a tracked file before editing annotations".to_string());
             return;
         }
@@ -395,10 +726,17 @@ impl App {
         };
 
         let Some(target) = choice else {
-            self.message =
-                Some("there is no editable note or question on the current line".to_string());
+            self.message = Some(if self.is_diff_mode() {
+                "there is no editable note or comment thread on the current line".to_string()
+            } else {
+                "there is no editable note or question on the current line".to_string()
+            });
             return;
         };
+        let current_line = self
+            .current_annotation_target()
+            .map(|(_, line)| line)
+            .unwrap_or(self.cursor_line);
 
         let draft = match target {
             DraftTarget::EditNote { index } => {
@@ -421,7 +759,7 @@ impl App {
                     path: question.path.clone(),
                     anchor: question
                         .anchor
-                        .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+                        .unwrap_or_else(|| Anchor::new(current_line, None)),
                     related_note_ids: question.related_note_ids.clone(),
                     buffer: TextBuffer::from_text(question.prompt.clone()),
                     original_text: question.prompt.clone(),
@@ -439,7 +777,7 @@ impl App {
                     path: question.path.clone(),
                     anchor: question
                         .anchor
-                        .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+                        .unwrap_or_else(|| Anchor::new(current_line, None)),
                     related_note_ids: question.related_note_ids.clone(),
                     buffer: TextBuffer::from_text(message.body.clone()),
                     original_text: message.body.clone(),
@@ -453,28 +791,51 @@ impl App {
 
         self.draft = Some(draft);
         self.visual_anchor = None;
+        if let Some(browser) = &mut self.diff_browser {
+            browser.visual_anchor_row = None;
+        }
         self.input_mode = InputMode::Draft;
-        self.message =
-            Some("edit the annotation; Ctrl-S saves, Ctrl-O opens the external editor".to_string());
+        self.message = Some(
+            if self.is_diff_mode() {
+                "edit the review comment; Ctrl-S saves, Ctrl-O opens the external editor"
+            } else {
+                "edit the annotation; Ctrl-S saves, Ctrl-O opens the external editor"
+            }
+            .to_string(),
+        );
     }
 
     fn begin_new_draft(&mut self, kind: DraftKind) {
-        if self.files.is_empty() {
+        let has_context = if self.is_diff_mode() {
+            !self.diff_files().is_empty()
+        } else {
+            !self.files.is_empty()
+        };
+        if !has_context {
             self.message = Some("add a tracked file before creating annotations".to_string());
             return;
         }
+        let Some((path, anchor)) = self.selected_draft_target() else {
+            self.message = Some(
+                "move to a context, added, or unchanged line in the diff before annotating"
+                    .to_string(),
+            );
+            return;
+        };
         self.discard_guard = false;
-        let anchor = self.selected_anchor();
         let related_note_ids = if kind == DraftKind::Question {
-            self.related_note_ids_for_anchor(anchor)
+            self.related_note_ids_for_anchor(&path, anchor)
         } else {
             Vec::new()
         };
         self.visual_anchor = None;
+        if let Some(browser) = &mut self.diff_browser {
+            browser.visual_anchor_row = None;
+        }
         self.draft = Some(PromptDraft {
             kind,
             target: DraftTarget::New,
-            path: self.current_path().to_string(),
+            path,
             anchor,
             related_note_ids,
             buffer: TextBuffer::default(),
@@ -482,11 +843,17 @@ impl App {
         });
         self.input_mode = InputMode::Draft;
         self.message = Some(
-            match kind {
-                DraftKind::Question => {
+            match (self.is_diff_mode(), kind) {
+                (true, DraftKind::Question) => {
+                    "compose the review comment; Ctrl-S saves, Ctrl-O opens the external editor"
+                }
+                (true, DraftKind::Note) => {
+                    "write the review note; Ctrl-S saves, Ctrl-O opens the external editor"
+                }
+                (false, DraftKind::Question) => {
                     "compose the follow-up question; Ctrl-S saves, Ctrl-O opens the external editor"
                 }
-                DraftKind::Note => {
+                (false, DraftKind::Note) => {
                     "write the note body; Ctrl-S saves, Ctrl-O opens the external editor"
                 }
             }
@@ -590,28 +957,79 @@ impl App {
     }
 
     pub fn begin_search(&mut self) {
-        let candidates = self
-            .packet
-            .notes
-            .iter()
-            .map(|note| SearchMatch {
-                path: note.path.clone(),
-                line: anchor_display_line(note.anchor),
-                label: format!("Note: {}", note.title),
-                preview: note.body.clone(),
-            })
-            .chain(self.packet.questions.iter().filter_map(|question| {
-                question.anchor.map(|anchor| SearchMatch {
-                    path: question.path.clone(),
-                    line: anchor_display_line(anchor),
-                    label: format!("Question ({})", question_status_label(question.status)),
-                    preview: question_search_preview(question),
+        let diff_mode = self.is_diff_mode();
+        let candidates = if diff_mode {
+            let Some(browser) = self.diff_browser.as_ref() else {
+                return;
+            };
+            let mut seen_notes = HashSet::new();
+            let mut seen_questions = HashSet::new();
+            let mut candidates = Vec::new();
+
+            for row in &browser.view_metrics.rows {
+                let DiffRow::Annotation { path, line_no } = row else {
+                    continue;
+                };
+
+                for note in self
+                    .notes_for_path(path)
+                    .into_iter()
+                    .filter(|note| anchor_display_line(note.anchor) == *line_no)
+                {
+                    if seen_notes.insert(note.id.clone()) {
+                        candidates.push(SearchMatch {
+                            path: note.path.clone(),
+                            line: *line_no,
+                            label: format!("Note: {}", note.title),
+                            preview: note.body.clone(),
+                        });
+                    }
+                }
+
+                for question in self
+                    .questions_for_path(path)
+                    .into_iter()
+                    .filter(|question| question.anchor.map(anchor_display_line) == Some(*line_no))
+                {
+                    if seen_questions.insert(question.id.clone()) {
+                        candidates.push(SearchMatch {
+                            path: question.path.clone(),
+                            line: *line_no,
+                            label: format!("Comment ({})", question_status_label(question.status)),
+                            preview: question_search_preview(question),
+                        });
+                    }
+                }
+            }
+
+            candidates
+        } else {
+            self.packet
+                .notes
+                .iter()
+                .map(|note| SearchMatch {
+                    path: note.path.clone(),
+                    line: anchor_display_line(note.anchor),
+                    label: format!("Note: {}", note.title),
+                    preview: note.body.clone(),
                 })
-            }))
-            .collect::<Vec<_>>();
+                .chain(self.packet.questions.iter().filter_map(|question| {
+                    question.anchor.map(|anchor| SearchMatch {
+                        path: question.path.clone(),
+                        line: anchor_display_line(anchor),
+                        label: format!("Question ({})", question_status_label(question.status)),
+                        preview: question_search_preview(question),
+                    })
+                }))
+                .collect::<Vec<_>>()
+        };
 
         if candidates.is_empty() {
-            self.message = Some("there are no notes or open questions to search yet".to_string());
+            self.message = Some(if diff_mode {
+                "there are no review notes or comment threads to search yet".to_string()
+            } else {
+                "there are no notes or questions to search yet".to_string()
+            });
             return;
         }
 
@@ -624,8 +1042,11 @@ impl App {
         search.refresh_matches();
         self.search = Some(search);
         self.input_mode = InputMode::Search;
-        self.message =
-            Some("fuzzy-search notes and questions, then press Enter to jump".to_string());
+        self.message = Some(if diff_mode {
+            "fuzzy-search review notes and comment threads, then press Enter to jump".to_string()
+        } else {
+            "fuzzy-search notes and questions, then press Enter to jump".to_string()
+        });
     }
 
     pub fn cancel_search(&mut self) {
@@ -661,9 +1082,29 @@ impl App {
             search.refresh_matches();
             self.search = Some(search);
             self.input_mode = InputMode::Search;
-            self.message = Some("no note or question matches the current search".to_string());
+            self.message = Some(if self.is_diff_mode() {
+                "no review note or comment thread matches the current search".to_string()
+            } else {
+                "no note or question matches the current search".to_string()
+            });
             return false;
         };
+
+        if self.is_diff_mode() {
+            if self.jump_to_diff_annotation_match(&selection.path, selection.line) {
+                self.focus = FocusPane::Source;
+                self.input_mode = InputMode::Normal;
+                self.message = Some(format!("jumped to {}:{}", selection.path, selection.line));
+                return true;
+            }
+
+            self.input_mode = InputMode::Normal;
+            self.message = Some(
+                "that note or comment thread is outside the currently visible diff context"
+                    .to_string(),
+            );
+            return false;
+        }
 
         if let Some(index) = self
             .files
@@ -684,6 +1125,40 @@ impl App {
         self.cursor_line = selection.line.max(1);
         self.ensure_cursor_visible();
         self.message = Some(format!("jumped to {}:{}", selection.path, selection.line));
+        true
+    }
+
+    fn jump_to_diff_annotation_match(&mut self, path: &str, line: usize) -> bool {
+        let Some(browser) = &mut self.diff_browser else {
+            return false;
+        };
+        let Some(file_index) = browser
+            .files
+            .iter()
+            .position(|file| file.display_path() == path)
+        else {
+            return false;
+        };
+        let Some(row_index) =
+            browser
+                .view_metrics
+                .rows
+                .iter()
+                .enumerate()
+                .find_map(|(row, kind)| match kind {
+                    DiffRow::Annotation {
+                        path: row_path,
+                        line_no,
+                    } if row_path == path && *line_no == line => Some(row),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        browser.current_file = file_index;
+        browser.cursor_row = row_index;
+        self.ensure_cursor_visible();
+        self.update_current_diff_file_from_cursor();
         true
     }
 
@@ -774,27 +1249,59 @@ impl App {
         self.dirty = true;
         self.input_mode = InputMode::Normal;
         self.message = Some(
-            match (draft.kind, draft.target) {
-                (DraftKind::Question, DraftTarget::New) => {
+            match (self.is_diff_mode(), draft.kind, draft.target) {
+                (true, DraftKind::Question, DraftTarget::New) => {
+                    "comment staged; press s to save or y/x to export the review"
+                }
+                (true, DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
+                    "comment reply staged; press s to save or y/x to export the review"
+                }
+                (true, DraftKind::Note, DraftTarget::New) => {
+                    "review note staged; press s to save or keep reading"
+                }
+                (
+                    true,
+                    DraftKind::Question,
+                    DraftTarget::EditQuestionPrompt { .. }
+                    | DraftTarget::EditQuestionMessage { .. },
+                ) => "comment updated; press s to save or y/x to export the review",
+                (true, DraftKind::Note, DraftTarget::EditNote { .. }) => {
+                    "review note updated; press s to save or keep reading"
+                }
+                (true, DraftKind::Question, DraftTarget::EditNote { .. })
+                | (
+                    true,
+                    DraftKind::Note,
+                    DraftTarget::EditQuestionPrompt { .. }
+                    | DraftTarget::EditQuestionMessage { .. }
+                    | DraftTarget::ContinueQuestion { .. },
+                ) => "review annotation updated",
+                (false, DraftKind::Question, DraftTarget::New) => {
                     "question staged; press s to save or x to save and export"
                 }
-                (DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
+                (false, DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
                     "follow-up staged; press s to save or x to save and export"
                 }
-                (DraftKind::Note, DraftTarget::New) => {
+                (false, DraftKind::Note, DraftTarget::New) => {
                     "note staged; press s to save or keep reading"
                 }
-                (DraftKind::Question, DraftTarget::EditQuestionPrompt { .. })
-                | (DraftKind::Question, DraftTarget::EditQuestionMessage { .. }) => {
-                    "question updated; press s to save or x to save and export"
-                }
-                (DraftKind::Note, DraftTarget::EditNote { .. }) => {
+                (
+                    false,
+                    DraftKind::Question,
+                    DraftTarget::EditQuestionPrompt { .. }
+                    | DraftTarget::EditQuestionMessage { .. },
+                ) => "question updated; press s to save or x to save and export",
+                (false, DraftKind::Note, DraftTarget::EditNote { .. }) => {
                     "note updated; press s to save or keep reading"
                 }
-                (DraftKind::Question, DraftTarget::EditNote { .. })
-                | (DraftKind::Note, DraftTarget::EditQuestionPrompt { .. })
-                | (DraftKind::Note, DraftTarget::EditQuestionMessage { .. })
-                | (DraftKind::Note, DraftTarget::ContinueQuestion { .. }) => "annotation updated",
+                (false, DraftKind::Question, DraftTarget::EditNote { .. })
+                | (
+                    false,
+                    DraftKind::Note,
+                    DraftTarget::EditQuestionPrompt { .. }
+                    | DraftTarget::EditQuestionMessage { .. }
+                    | DraftTarget::ContinueQuestion { .. },
+                ) => "annotation updated",
             }
             .to_string(),
         );
@@ -810,41 +1317,83 @@ impl App {
     }
 
     pub fn export_questions(&mut self) -> Result<()> {
-        let export = export::generate_question_export(&self.packet, &self.packet_path)?;
+        let export = self.question_export_text()?;
         self.discard_guard = false;
         if self.output_to_stdout {
-            self.message = Some("open questions rendered to stdout on exit".to_string());
+            self.message = Some(if self.is_diff_mode() {
+                "diff review rendered to stdout on exit".to_string()
+            } else {
+                "open questions rendered to stdout on exit".to_string()
+            });
             self.quit_export = Some(export);
         } else {
             let message = clipboard::copy_text(&export)?;
-            self.message = Some(format!("open questions {message}"));
+            self.message = Some(if self.is_diff_mode() {
+                format!("diff review {message}")
+            } else {
+                format!("open questions {message}")
+            });
         }
         Ok(())
     }
 
     pub fn save_and_quit(&mut self) -> Result<()> {
         self.save()?;
-        let notice = if self.packet.questions_requiring_reply().count() > 0 {
-            let export = export::generate_question_export(&self.packet, &self.packet_path)?;
-            if self.output_to_stdout {
-                self.quit_export = Some(export);
-                format!(
-                    "saved {} and wrote the open questions to stdout",
-                    self.packet_path.display()
-                )
-            } else {
-                let copy_result = clipboard::copy_text(&export)?;
-                format!(
-                    "saved {} and exported the open questions ({copy_result})",
-                    self.packet_path.display()
-                )
+        let notice = match self.question_export_text() {
+            Ok(export) => {
+                if self.output_to_stdout {
+                    self.quit_export = Some(export);
+                    format!(
+                        "saved {} and wrote the {} to stdout",
+                        self.packet_path.display(),
+                        if self.is_diff_mode() {
+                            "diff review"
+                        } else {
+                            "open questions"
+                        }
+                    )
+                } else {
+                    let copy_result = clipboard::copy_text(&export)?;
+                    format!(
+                        "saved {} and exported the {} ({copy_result})",
+                        self.packet_path.display(),
+                        if self.is_diff_mode() {
+                            "diff review"
+                        } else {
+                            "open questions"
+                        }
+                    )
+                }
             }
-        } else {
-            format!("saved {}", self.packet_path.display())
+            Err(_) => {
+                format!("saved {}", self.packet_path.display())
+            }
         };
         self.quit_notice = Some(notice);
         self.should_quit = true;
         Ok(())
+    }
+
+    fn question_export_text(&self) -> Result<String> {
+        if self.is_diff_mode()
+            && let Some(browser) = &self.diff_browser
+            && let Some(selection) = browser.selection.clone()
+        {
+            return export::generate_review_question_export(
+                &self.packet,
+                &self.packet_path,
+                &export::ReviewExportContext {
+                    selection,
+                    review_entries: browser.active_review_entries.clone(),
+                    changed_paths: browser
+                        .files
+                        .iter()
+                        .map(|file| file.display_path().to_string())
+                        .collect(),
+                },
+            );
+        }
+        export::generate_question_export(&self.packet, &self.packet_path)
     }
 
     pub fn delete_current_file(&mut self) -> bool {
@@ -924,13 +1473,7 @@ impl App {
             return true;
         }
 
-        let path = self.current_path().to_string();
-        if let Some(index) = self
-            .packet
-            .notes
-            .iter()
-            .rposition(|note| note.path == path && note_covers_line(note, self.cursor_line))
-        {
+        if let Some(index) = self.current_note_index() {
             let deleted = self.packet.notes.remove(index);
             self.packet.touch();
             self.dirty = true;
@@ -939,11 +1482,16 @@ impl App {
             return true;
         }
 
-        self.message = Some("no note or question is attached to the current line".to_string());
+        self.message = Some(if self.is_diff_mode() {
+            "no note or comment thread is attached to the current line".to_string()
+        } else {
+            "no note or question is attached to the current line".to_string()
+        });
         false
     }
 
     fn delete_latest_question_turn(&mut self, index: usize) -> String {
+        let diff_mode = self.is_diff_mode();
         let Some(message_index) = self
             .packet
             .questions
@@ -951,11 +1499,19 @@ impl App {
             .and_then(latest_user_message_index)
         else {
             let deleted = self.packet.questions.remove(index);
-            return format!("deleted question {}", deleted.id);
+            return if diff_mode {
+                format!("deleted comment thread {}", deleted.id)
+            } else {
+                format!("deleted question {}", deleted.id)
+            };
         };
 
         let Some(question) = self.packet.questions.get_mut(index) else {
-            return "no question is attached to the current line".to_string();
+            return if diff_mode {
+                "no comment thread is attached to the current line".to_string()
+            } else {
+                "no question is attached to the current line".to_string()
+            };
         };
 
         let removed_count = question.conversation.len().saturating_sub(message_index);
@@ -966,21 +1522,39 @@ impl App {
             QuestionStatus::Answered
         };
         question.updated_at = Utc::now();
+        let question_id = question.id.clone();
         if removed_count == 1 {
-            format!("deleted latest follow-up from question {}", question.id)
+            if diff_mode {
+                format!("deleted latest reply from comment thread {question_id}")
+            } else {
+                format!("deleted latest follow-up from question {question_id}")
+            }
         } else {
-            format!(
-                "deleted latest follow-up from question {} and {} dependent repl{}",
-                question.id,
-                removed_count - 1,
-                if removed_count == 2 { "y" } else { "ies" }
-            )
+            if diff_mode {
+                format!(
+                    "deleted latest reply from comment thread {} and {} dependent repl{}",
+                    question_id,
+                    removed_count - 1,
+                    if removed_count == 2 { "y" } else { "ies" }
+                )
+            } else {
+                format!(
+                    "deleted latest follow-up from question {} and {} dependent repl{}",
+                    question_id,
+                    removed_count - 1,
+                    if removed_count == 2 { "y" } else { "ies" }
+                )
+            }
         }
     }
 
     pub fn resolve_current_question(&mut self) -> bool {
         let Some(index) = self.current_open_question_index() else {
-            self.message = Some("there is no open question thread on the current line".to_string());
+            self.message = Some(if self.is_diff_mode() {
+                "there is no open comment thread on the current line".to_string()
+            } else {
+                "there is no open question thread on the current line".to_string()
+            });
             return false;
         };
         let question_id = {
@@ -992,17 +1566,29 @@ impl App {
         self.packet.touch();
         self.dirty = true;
         self.discard_guard = false;
-        self.message = Some(format!("resolved question {question_id}"));
+        self.message = Some(if self.is_diff_mode() {
+            format!("closed comment thread {question_id}")
+        } else {
+            format!("closed question {question_id}")
+        });
         true
     }
 
     pub fn reopen_current_question(&mut self) -> bool {
         let Some(index) = self.current_question_index() else {
-            self.message = Some("there is no question thread on the current line".to_string());
+            self.message = Some(if self.is_diff_mode() {
+                "there is no comment thread on the current line".to_string()
+            } else {
+                "there is no question thread on the current line".to_string()
+            });
             return false;
         };
         if self.packet.questions[index].status == QuestionStatus::Open {
-            self.message = Some("the current question thread is already open".to_string());
+            self.message = Some(if self.is_diff_mode() {
+                "the current comment thread is already open".to_string()
+            } else {
+                "the current question thread is already open".to_string()
+            });
             return false;
         }
         let question_id = {
@@ -1014,7 +1600,11 @@ impl App {
         self.packet.touch();
         self.dirty = true;
         self.discard_guard = false;
-        self.message = Some(format!("reopened question {question_id}"));
+        self.message = Some(if self.is_diff_mode() {
+            format!("reopened comment thread {question_id}")
+        } else {
+            format!("reopened question {question_id}")
+        });
         true
     }
 
@@ -1030,6 +1620,9 @@ impl App {
     }
 
     pub fn reload_sources(&mut self) -> Result<()> {
+        if self.is_diff_mode() {
+            return self.reload_diff_selection();
+        }
         self.files = load_files(&self.root, &self.packet);
         if self.current_file >= self.files.len() {
             self.current_file = self.files.len().saturating_sub(1);
@@ -1041,8 +1634,19 @@ impl App {
     }
 
     pub fn update_view_metrics(&mut self, mut metrics: ViewMetrics) {
+        if self.is_diff_mode() {
+            return;
+        }
         metrics.viewport_height = metrics.viewport_height.max(1);
         self.view_metrics = metrics;
+        self.ensure_cursor_visible();
+    }
+
+    pub fn update_diff_view_metrics(&mut self, mut metrics: DiffViewMetrics) {
+        metrics.viewport_height = metrics.viewport_height.max(1);
+        if let Some(browser) = &mut self.diff_browser {
+            browser.view_metrics = metrics;
+        }
         self.ensure_cursor_visible();
     }
 
@@ -1095,12 +1699,13 @@ impl App {
     }
 
     pub fn notes_for_current_line(&self) -> Vec<&Note> {
+        let Some((path, line)) = self.current_annotation_target() else {
+            return Vec::new();
+        };
         self.packet
             .notes
             .iter()
-            .filter(|note| {
-                note.path == self.current_path() && note_covers_line(note, self.cursor_line)
-            })
+            .filter(|note| note.path == path && note_covers_line(note, line))
             .collect()
     }
 
@@ -1121,18 +1726,19 @@ impl App {
     }
 
     fn current_note_index(&self) -> Option<usize> {
-        let path = self.current_path();
+        let (path, line) = self.current_annotation_target()?;
         self.packet
             .notes
             .iter()
-            .rposition(|note| note.path == path && note_covers_line(note, self.cursor_line))
+            .rposition(|note| note.path == path && note_covers_line(note, line))
     }
 
     fn current_question_index(&self) -> Option<usize> {
-        let path = self.current_path();
-        self.packet.questions.iter().rposition(|question| {
-            question.path == path && question_covers_line(question, self.cursor_line)
-        })
+        let (path, line) = self.current_annotation_target()?;
+        self.packet
+            .questions
+            .iter()
+            .rposition(|question| question.path == path && question_covers_line(question, line))
     }
 
     fn latest_question_draft_target(&self, question_index: usize) -> DraftTarget {
@@ -1153,21 +1759,16 @@ impl App {
     }
 
     fn current_open_question_index(&self) -> Option<usize> {
-        let path = self.current_path();
+        let (path, line) = self.current_annotation_target()?;
         self.packet.questions.iter().rposition(|question| {
             question.path == path
                 && question.status == QuestionStatus::Open
-                && question_covers_line(question, self.cursor_line)
+                && question_covers_line(question, line)
         })
     }
 
-    fn selected_anchor(&self) -> Anchor {
-        self.visual_selection()
-            .unwrap_or_else(|| Anchor::new(self.cursor_line, None))
-    }
-
-    fn related_note_ids_for_anchor(&self, anchor: Anchor) -> Vec<String> {
-        self.notes_for_path(self.current_path())
+    fn related_note_ids_for_anchor(&self, path: &str, anchor: Anchor) -> Vec<String> {
+        self.notes_for_path(path)
             .into_iter()
             .filter(|note| anchors_overlap(note.anchor, anchor))
             .map(|note| note.id.clone())
@@ -1175,6 +1776,10 @@ impl App {
     }
 
     fn ensure_cursor_visible(&mut self) {
+        if self.is_diff_mode() {
+            self.ensure_diff_cursor_visible();
+            return;
+        }
         if self.view_metrics.line_to_row.is_empty() {
             self.scroll = 0;
             return;
@@ -1196,6 +1801,406 @@ impl App {
 
         let max_scroll = self.view_metrics.total_rows.saturating_sub(viewport_height);
         self.scroll = self.scroll.min(max_scroll);
+    }
+}
+
+impl DiffBrowserState {
+    fn new(root: &Path) -> Result<Self> {
+        let loader = GitDiffLoader::discover(root)?;
+        let commit_options = loader.selection_options(DEFAULT_COMMIT_LIMIT)?;
+        Ok(Self {
+            loader,
+            commit_options,
+            active_review_entries: Vec::new(),
+            commit_cursor: 0,
+            commit_selection_range: Some((0, 0)),
+            selection: None,
+            files: Vec::new(),
+            current_file: 0,
+            cursor_row: 0,
+            scroll: 0,
+            view_metrics: DiffViewMetrics::default(),
+            expanded_gaps: HashSet::new(),
+            expanded_content: HashMap::new(),
+            reviewed_paths: BTreeSet::new(),
+            visual_anchor_row: None,
+        })
+    }
+}
+
+impl App {
+    pub fn reopen_diff_commit_selector(&mut self) -> Result<()> {
+        let Some(browser) = &mut self.diff_browser else {
+            return Ok(());
+        };
+        browser.commit_options = browser.loader.selection_options(DEFAULT_COMMIT_LIMIT)?;
+        browser.commit_cursor = 0;
+        browser.commit_selection_range = Some((0, 0));
+        self.input_mode = InputMode::CommitSelect;
+        self.message = Some(
+            "select uncommitted changes or a contiguous commit range, then press Enter".to_string(),
+        );
+        Ok(())
+    }
+
+    pub fn move_diff_commit_cursor(&mut self, delta: isize) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.commit_options.is_empty() {
+            browser.commit_cursor = 0;
+            return;
+        }
+        browser.commit_cursor = (browser.commit_cursor as isize + delta)
+            .clamp(0, browser.commit_options.len().saturating_sub(1) as isize)
+            as usize;
+    }
+
+    pub fn toggle_diff_commit_selection(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.commit_options.is_empty() {
+            return;
+        }
+
+        let cursor = browser.commit_cursor;
+        match browser.commit_selection_range {
+            None => browser.commit_selection_range = Some((cursor, cursor)),
+            Some((start, end)) => {
+                if cursor < start {
+                    browser.commit_selection_range = Some((cursor, end));
+                } else if cursor > end {
+                    browser.commit_selection_range = Some((start, cursor));
+                } else if start == end {
+                    browser.commit_selection_range = None;
+                } else if cursor == start {
+                    browser.commit_selection_range = Some((start + 1, end));
+                } else if cursor == end {
+                    browser.commit_selection_range = Some((start, end - 1));
+                } else {
+                    browser.commit_selection_range = Some((start, cursor));
+                }
+            }
+        }
+    }
+
+    pub fn confirm_diff_commit_selection(&mut self) -> Result<()> {
+        let Some(browser) = &mut self.diff_browser else {
+            return Ok(());
+        };
+        let Some((start, end)) = browser.commit_selection_range else {
+            self.message = Some("select at least one entry before opening the diff".to_string());
+            return Ok(());
+        };
+        let Some(selected_slice) = browser.commit_options.get(start..=end) else {
+            self.message = Some("the current commit selection is invalid".to_string());
+            return Ok(());
+        };
+        browser.active_review_entries = selected_slice.to_vec();
+
+        let includes_working_tree = selected_slice
+            .first()
+            .map(CommitInfo::is_working_tree)
+            .unwrap_or(false);
+        let commit_ids = selected_slice
+            .iter()
+            .filter(|entry| !entry.is_working_tree())
+            .map(|entry| entry.id.clone())
+            .rev()
+            .collect::<Vec<_>>();
+
+        let selection = if includes_working_tree {
+            if commit_ids.is_empty() {
+                DiffSelection::WorkingTree
+            } else {
+                DiffSelection::WorkingTreeAndCommits(commit_ids)
+            }
+        } else {
+            DiffSelection::CommitRange(commit_ids)
+        };
+
+        browser.files = browser.loader.diff_for_selection(&selection)?;
+        browser.selection = Some(selection);
+        browser.current_file = 0;
+        browser.cursor_row = 0;
+        browser.scroll = 0;
+        browser.view_metrics = DiffViewMetrics::default();
+        browser.expanded_gaps.clear();
+        browser.expanded_content.clear();
+        browser.visual_anchor_row = None;
+        self.input_mode = InputMode::Normal;
+        self.focus = FocusPane::Source;
+        self.message = Some("diff loaded".to_string());
+        Ok(())
+    }
+
+    fn reload_diff_selection(&mut self) -> Result<()> {
+        let Some(browser) = &mut self.diff_browser else {
+            return Ok(());
+        };
+        let Some(selection) = browser.selection.clone() else {
+            self.message = Some("choose a diff range first from the commit selector".to_string());
+            return Ok(());
+        };
+        browser.files = browser.loader.diff_for_selection(&selection)?;
+        browser.current_file = browser
+            .current_file
+            .min(browser.files.len().saturating_sub(1));
+        browser.cursor_row = 0;
+        browser.scroll = 0;
+        browser.view_metrics = DiffViewMetrics::default();
+        browser.expanded_gaps.clear();
+        browser.expanded_content.clear();
+        browser.visual_anchor_row = None;
+        self.message = Some("reloaded diff selection".to_string());
+        Ok(())
+    }
+
+    fn move_diff_file(&mut self, delta: isize) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.files.is_empty() {
+            return;
+        }
+        let next = (browser.current_file as isize + delta)
+            .clamp(0, browser.files.len().saturating_sub(1) as isize) as usize;
+        self.select_diff_file(next);
+    }
+
+    fn select_diff_file(&mut self, index: usize) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.files.is_empty() {
+            browser.current_file = 0;
+            browser.cursor_row = 0;
+            browser.scroll = 0;
+            return;
+        }
+        browser.current_file = index.min(browser.files.len().saturating_sub(1));
+        browser.cursor_row = browser
+            .view_metrics
+            .file_rows
+            .get(browser.current_file)
+            .copied()
+            .unwrap_or(0);
+        self.ensure_cursor_visible();
+    }
+
+    fn move_diff_cursor(&mut self, delta: isize) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.view_metrics.total_rows == 0 {
+            browser.cursor_row = 0;
+            browser.scroll = 0;
+            return;
+        }
+        browser.cursor_row = (browser.cursor_row as isize + delta).clamp(
+            0,
+            browser.view_metrics.total_rows.saturating_sub(1) as isize,
+        ) as usize;
+        self.ensure_cursor_visible();
+        self.update_current_diff_file_from_cursor();
+    }
+
+    fn go_to_first_diff_row(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        browser.cursor_row = 0;
+        self.ensure_cursor_visible();
+        self.update_current_diff_file_from_cursor();
+    }
+
+    fn go_to_last_diff_row(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        browser.cursor_row = browser.view_metrics.total_rows.saturating_sub(1);
+        self.ensure_cursor_visible();
+        self.update_current_diff_file_from_cursor();
+    }
+
+    fn jump_to_next_diff_annotation(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if let Some(row) = browser
+            .view_metrics
+            .annotation_rows
+            .iter()
+            .copied()
+            .find(|row| *row > browser.cursor_row)
+            .or_else(|| browser.view_metrics.annotation_rows.first().copied())
+        {
+            browser.cursor_row = row;
+            self.ensure_cursor_visible();
+            self.update_current_diff_file_from_cursor();
+        } else {
+            self.message = Some("there are no notes or comment threads in this diff".to_string());
+        }
+    }
+
+    fn jump_to_previous_diff_annotation(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if let Some(row) = browser
+            .view_metrics
+            .annotation_rows
+            .iter()
+            .copied()
+            .rev()
+            .find(|row| *row < browser.cursor_row)
+            .or_else(|| browser.view_metrics.annotation_rows.last().copied())
+        {
+            browser.cursor_row = row;
+            self.ensure_cursor_visible();
+            self.update_current_diff_file_from_cursor();
+        } else {
+            self.message = Some("there are no notes or comment threads in this diff".to_string());
+        }
+    }
+
+    fn ensure_diff_cursor_visible(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.view_metrics.total_rows == 0 {
+            browser.scroll = 0;
+            return;
+        }
+        let viewport_height = browser.view_metrics.viewport_height.max(1);
+        if browser.cursor_row < browser.scroll {
+            browser.scroll = browser.cursor_row;
+        } else if browser.cursor_row >= browser.scroll + viewport_height {
+            browser.scroll = browser
+                .cursor_row
+                .saturating_add(1)
+                .saturating_sub(viewport_height);
+        }
+        let max_scroll = browser
+            .view_metrics
+            .total_rows
+            .saturating_sub(viewport_height);
+        browser.scroll = browser.scroll.min(max_scroll);
+    }
+
+    fn update_current_diff_file_from_cursor(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        if browser.view_metrics.file_rows.is_empty() {
+            browser.current_file = 0;
+            return;
+        }
+        browser.current_file = browser
+            .view_metrics
+            .file_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| **row <= browser.cursor_row)
+            .map(|(index, _)| index)
+            .last()
+            .unwrap_or(0);
+    }
+
+    pub fn toggle_diff_gap_at_cursor(&mut self) -> Result<()> {
+        let Some(row) = self.current_diff_row().cloned() else {
+            return Ok(());
+        };
+        match row {
+            DiffRow::GapExpander { gap_id } => {
+                if self
+                    .diff_browser
+                    .as_ref()
+                    .is_some_and(|browser| browser.expanded_gaps.contains(&gap_id))
+                {
+                    self.collapse_diff_gap(gap_id);
+                } else {
+                    self.expand_diff_gap(gap_id)?;
+                }
+            }
+            DiffRow::ExpandedContext { gap_id, .. } => {
+                self.collapse_diff_gap(gap_id);
+            }
+            _ => {
+                self.message =
+                    Some("move to a collapsed or expanded context row first".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn expand_diff_gap(&mut self, gap_id: GapId) -> Result<()> {
+        let Some(browser) = &mut self.diff_browser else {
+            return Ok(());
+        };
+        if browser.expanded_gaps.contains(&gap_id) {
+            return Ok(());
+        }
+        let file = browser
+            .files
+            .get(gap_id.file_idx)
+            .context("invalid diff file index for context expansion")?;
+        let hunk = file
+            .hunks
+            .get(gap_id.hunk_idx)
+            .context("invalid diff hunk index for context expansion")?;
+        let previous_hunk = gap_id
+            .hunk_idx
+            .checked_sub(1)
+            .and_then(|index| file.hunks.get(index));
+        let (start_line, end_line) = match previous_hunk {
+            None => (1, hunk.new_start.saturating_sub(1)),
+            Some(previous) => (
+                previous.new_start.saturating_add(previous.new_count),
+                hunk.new_start.saturating_sub(1),
+            ),
+        };
+        if start_line > end_line {
+            return Ok(());
+        }
+        let lines = browser
+            .loader
+            .fetch_context_lines(file, start_line, end_line)?;
+        browser.expanded_content.insert(gap_id.clone(), lines);
+        browser.expanded_gaps.insert(gap_id);
+        self.message = Some("expanded hidden context".to_string());
+        Ok(())
+    }
+
+    fn collapse_diff_gap(&mut self, gap_id: GapId) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        browser.expanded_gaps.remove(&gap_id);
+        browser.expanded_content.remove(&gap_id);
+        self.message = Some("collapsed expanded context".to_string());
+    }
+
+    pub fn mark_current_diff_file_reviewed_and_next(&mut self) {
+        let Some(browser) = &mut self.diff_browser else {
+            return;
+        };
+        let Some(path) = browser
+            .files
+            .get(browser.current_file)
+            .map(|file| file.display_path().to_string())
+        else {
+            return;
+        };
+        browser.reviewed_paths.insert(path.clone());
+        let current = browser.current_file;
+        if current + 1 < browser.files.len() {
+            self.select_diff_file(current + 1);
+            self.message = Some(format!("marked {path} reviewed and moved to the next file"));
+        } else {
+            self.message = Some(format!("marked {path} reviewed"));
+        }
     }
 }
 
@@ -1482,7 +2487,7 @@ mod tests {
 
     use crate::model::{Note, NoteKind, NoteSource, Packet, Question, QuestionStatus, TrackedFile};
 
-    use super::{App, DraftKind, FocusPane, InputMode, TextBuffer};
+    use super::{App, DraftKind, DraftTarget, FocusPane, InputMode, TextBuffer};
     use crate::model::Anchor;
 
     #[test]
@@ -1819,6 +2824,33 @@ mod tests {
             app.packet.questions[0].conversation[1].role,
             crate::model::QuestionMessageRole::User
         );
+    }
+
+    #[test]
+    fn begin_question_or_follow_up_prefers_open_thread_under_cursor() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        packet.questions.push(Question::new(
+            "main.rs",
+            Some(Anchor::new(2, None)),
+            "Why is this separate?",
+            None,
+            vec![],
+        ));
+
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.cursor_line = 2;
+        app.begin_question_or_follow_up();
+
+        let draft = app.draft.as_ref().expect("question draft should exist");
+        assert_eq!(draft.target, DraftTarget::ContinueQuestion { index: 0 });
+        assert_eq!(app.input_mode, InputMode::Draft);
     }
 
     #[test]

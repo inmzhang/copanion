@@ -1,20 +1,20 @@
 ---
 name: "copanion"
-description: "Use when a user wants durable Copanion updates in the canonical per-project packet under Copanion's system data directory. This includes two bounded workflows: saving line-anchored study notes or follow-up questions for a small explicit file set, and answering exported Copanion question threads by writing agent replies back into the same packet. Do not use for generic repo exploration, broad architecture tours, or implementation work that does not need packet writeback."
+description: "Use when a user wants durable Copanion updates in the canonical per-project packet under Copanion's system data directory. This includes two bounded workflows: saving line-anchored study notes or follow-up question/comment threads for a small explicit file set or diff review, and answering exported Copanion question/comment threads by writing agent replies back into the same packet. Do not use for generic repo exploration, broad architecture tours, or implementation work that does not need packet writeback."
 ---
 
 # Copanion
 
 ## Overview
 
-Use this skill when the user wants durable Copanion state, not just a chat answer. The canonical packet under Copanion's system data directory is the source of truth for both study notes and question-thread conversations.
+Use this skill when the user wants durable Copanion state, not just a chat answer. The canonical packet under Copanion's system data directory is the source of truth for study notes, source-mode question threads, and diff-review comment threads.
 
 ## Trigger Gate
 
 Use this skill only when one of these is true:
 
-1. The user wants detailed understanding of a small explicit file set and wants the notes/questions saved into Copanion.
-2. The user wants exported Copanion follow-up questions answered and written back into Copanion.
+1. The user wants detailed understanding of a small explicit file set, or a bounded diff review, and wants the notes/questions/comments saved into Copanion.
+2. The user wants exported Copanion follow-up questions or diff-review comment threads answered and written back into Copanion.
 
 Do not use this skill when the task is:
 
@@ -33,9 +33,9 @@ Do not use this skill when the task is:
 
 ### 2. Pick the right mode
 
-#### Study mode: add notes or open questions
+#### Study mode: add notes or open threads
 
-Use this when the user wants durable learning notes on a small explicit file set.
+Use this when the user wants durable learning notes on a small explicit file set or a bounded diff review.
 
 - Keep the tracked file list intentionally small.
 - Read only the target files and the immediate neighbors needed for a correct explanation.
@@ -49,15 +49,16 @@ python <skill-directory>/scripts/apply_session_plan.py \
 ```
 
 - Prefer `overview` notes for role/intent, `flow` notes for control or data movement, `pitfall` notes for sharp edges, and `reference` notes for schemas or reusable facts.
-- Use open questions only for real uncertainty that should survive into a later answer pass.
+- In source mode, use open questions only for real uncertainty that should survive into a later answer pass.
+- In diff mode, use comment threads for review comments and follow-up discussion; the packet model is the same even though the TUI wording changes.
 
 #### Answer mode: write agent replies back into existing threads
 
-Use this when the user pasted a Copanion export or wants open Copanion questions answered durably.
+Use this when the user pasted a Copanion export or wants open Copanion questions or diff-review comment threads answered durably.
 
-- Match target questions against the packet before editing; prefer question ids when available.
-- Read only the files needed to answer the bounded question set well.
-- Write agent answers back as question-thread replies, not just chat output.
+- Match target questions/comments against the packet before editing; prefer question ids when available.
+- Read only the files needed to answer the bounded thread set well.
+- Write agent answers back as thread replies, not just chat output.
 - Answer the exported threads in order unless the user explicitly reprioritizes them.
 - Prefer the built-in write-back path:
 
@@ -75,7 +76,7 @@ copanion --apply-agent-response - <<'JSON'
 JSON
 ```
 
-- Leave answered threads `open` unless the user explicitly asks to resolve them immediately. Reopening Copanion should let the user continue the thread or resolve it from the TUI.
+- Leave answered threads `open` unless the user explicitly asks to close them immediately. Reopening Copanion should let the user continue or close the thread from the TUI.
 - Use `notes` only for durable line-anchored guidance that should outlive the conversation itself.
 
 ### 3. Hand off clearly

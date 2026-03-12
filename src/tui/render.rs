@@ -7,13 +7,15 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::diff::{DiffFile, DiffLine, LineOrigin, calculate_gap};
 use crate::model::{
     Note, NoteKind, NoteSource, Question, QuestionMessage, QuestionMessageRole, QuestionStatus,
 };
 use crate::theme::{self, Theme};
 
 use super::app::{
-    App, DraftKind, DraftTarget, FilePickerState, FocusPane, InputMode, PromptDraft, ViewMetrics,
+    App, DiffRow, DiffViewMetrics, DraftKind, DraftTarget, FilePickerState, FocusPane, InputMode,
+    PromptDraft, ViewMetrics,
 };
 
 #[derive(Clone, Copy)]
@@ -59,7 +61,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         InputMode::FilePicker => render_file_picker(frame, app, sections[1]),
         InputMode::Search => render_search(frame, app, sections[1]),
-        InputMode::Normal | InputMode::Visual => {}
+        InputMode::Normal | InputMode::Visual | InputMode::CommitSelect => {}
     }
 
     if let Some((x, y)) = app.composer_cursor_screen_pos {
@@ -68,6 +70,48 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+    if app.is_diff_mode() {
+        let current_path = app.current_diff_path().unwrap_or("Select a diff range");
+        let selection = match app.current_diff_selection() {
+            Some(crate::diff::DiffSelection::WorkingTree) => "working tree".to_string(),
+            Some(crate::diff::DiffSelection::CommitRange(commit_ids)) => {
+                format!(
+                    "{} commit{}",
+                    commit_ids.len(),
+                    if commit_ids.len() == 1 { "" } else { "s" }
+                )
+            }
+            Some(crate::diff::DiffSelection::WorkingTreeAndCommits(commit_ids)) => format!(
+                "working tree + {} commit{}",
+                commit_ids.len(),
+                if commit_ids.len() == 1 { "" } else { "s" }
+            ),
+            None => "choose commits".to_string(),
+        };
+        let header = Line::from(vec![
+            Span::styled(
+                " COPANION DIFF ",
+                Style::default().fg(theme().bg).bg(theme().accent),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                &app.packet.title,
+                Style::default()
+                    .fg(theme().text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(selection, Style::default().fg(theme().muted)),
+            Span::raw("  "),
+            Span::styled(current_path, Style::default().fg(theme().accent)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(header).style(Style::default().bg(theme().bg)),
+            area,
+        );
+        return;
+    }
+
     let file = app.current_file();
     let header = Line::from(vec![
         Span::styled(
@@ -102,6 +146,15 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_main(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.is_diff_mode() {
+        if app.input_mode == InputMode::CommitSelect {
+            render_commit_selector(frame, app, area);
+        } else {
+            render_diff_browser(frame, app, area);
+        }
+        return;
+    }
+
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(30), Constraint::Min(0)])
@@ -173,6 +226,203 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn render_commit_selector(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" Diff Selection ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(theme().border_focus));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(browser) = app.diff_browser.as_ref() else {
+        return;
+    };
+
+    let items = browser
+        .commit_options
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let selected = index == browser.commit_cursor;
+            let in_range = browser
+                .commit_selection_range
+                .is_some_and(|(start, end)| index >= start && index <= end);
+            let bg = if selected {
+                theme().cursor_line
+            } else {
+                theme().panel
+            };
+            let marker = if in_range { "●" } else { "○" };
+            let prefix = if selected { "▸ " } else { "  " };
+            let details = if entry.is_working_tree() {
+                entry.summary.clone()
+            } else if let Some(branch) = entry.branch_name.as_deref() {
+                format!("{}  {}  ({branch})", entry.short_id, entry.summary)
+            } else {
+                format!("{}  {}", entry.short_id, entry.summary)
+            };
+
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme().accent).bg(bg)),
+                Span::styled(
+                    marker,
+                    Style::default()
+                        .fg(if in_range {
+                            theme().success
+                        } else {
+                            theme().muted
+                        })
+                        .bg(bg),
+                ),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(details, Style::default().fg(theme().text).bg(bg)),
+                Span::styled(
+                    if entry.author.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", entry.author)
+                    },
+                    Style::default().fg(theme().muted).bg(bg),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(items).style(Style::default().bg(theme().panel)),
+        inner,
+    );
+}
+
+fn render_diff_browser(frame: &mut Frame, app: &mut App, area: Rect) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(32), Constraint::Min(0)])
+        .split(area);
+    render_diff_file_list(frame, app, columns[0]);
+    render_diff_view(frame, app, columns[1]);
+}
+
+fn render_diff_file_list(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == FocusPane::Files && app.input_mode == InputMode::Normal;
+    let block = Block::default()
+        .title(" Changed Files ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(browser) = app.diff_browser.as_ref() else {
+        return;
+    };
+
+    let lines = browser
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            let selected = index == browser.current_file;
+            let bg = if selected {
+                theme().cursor_line
+            } else {
+                theme().panel
+            };
+            let review_mark = if app.is_current_diff_file_reviewed(file.display_path()) {
+                "✓ "
+            } else {
+                ""
+            };
+            let note_count = app.file_note_count(file.display_path());
+            let question_count = app.file_open_question_count(file.display_path());
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▸ " } else { "  " },
+                    Style::default().fg(theme().accent).bg(bg),
+                ),
+                Span::styled(
+                    file.status.as_char().to_string(),
+                    Style::default()
+                        .fg(match file.status.as_char() {
+                            'A' | 'C' => theme().success,
+                            'D' => theme().danger,
+                            _ => theme().accent,
+                        })
+                        .bg(bg),
+                ),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(review_mark, Style::default().fg(theme().success).bg(bg)),
+                Span::styled(
+                    truncate_from_start(
+                        file.display_path(),
+                        inner.width.saturating_sub(16) as usize,
+                    ),
+                    Style::default()
+                        .fg(theme().text)
+                        .bg(bg)
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    format!("  {note_count}n {question_count}c"),
+                    Style::default().fg(theme().muted).bg(bg),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme().panel)),
+        inner,
+    );
+}
+
+fn render_diff_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == FocusPane::Source
+        && matches!(app.input_mode, InputMode::Normal | InputMode::Visual);
+    let title = if let Some(anchor) = app.visual_selection() {
+        app.current_diff_path()
+            .map(|path| format!(" {path} [visual {anchor}] "))
+            .unwrap_or_else(|| format!(" Diff [visual {anchor}] "))
+    } else {
+        app.current_diff_path()
+            .map(|path| format!(" {path} "))
+            .unwrap_or_else(|| " Diff ".to_string())
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(border_style(focused));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let (lines, metrics) = build_diff_lines(app, inner.width.max(16) as usize);
+    app.update_diff_view_metrics(DiffViewMetrics {
+        viewport_height: inner.height as usize,
+        ..metrics
+    });
+    let scroll = app
+        .diff_browser
+        .as_ref()
+        .map(|browser| browser.scroll)
+        .unwrap_or(0);
+    let visible = lines
+        .into_iter()
+        .skip(scroll)
+        .take(inner.height as usize)
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(visible).style(Style::default().bg(theme().panel)),
+        inner,
+    );
+}
+
 fn render_source_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == FocusPane::Source
         && matches!(app.input_mode, InputMode::Normal | InputMode::Visual);
@@ -213,7 +463,78 @@ fn render_source_view(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn render_diff_status(frame: &mut Frame, app: &App, area: Rect) {
+    let focus = status_mode_label(app);
+    let file_count = app.diff_files().len();
+    let dirty = if app.dirty { "unsaved" } else { "saved" };
+    let reviewed_count = app
+        .diff_browser
+        .as_ref()
+        .map(|browser| browser.reviewed_paths.len())
+        .unwrap_or(0);
+    let current_path = app.current_diff_path().unwrap_or("no diff");
+    let cursor_row = app
+        .diff_browser
+        .as_ref()
+        .map(|browser| browser.cursor_row.saturating_add(1))
+        .unwrap_or(0);
+    let hints = match app.input_mode {
+        InputMode::CommitSelect => "j/k move  Space toggle range  Enter open diff  q quit",
+        InputMode::Help => "q or Esc closes help",
+        InputMode::Normal if app.current_open_question().is_some() => {
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  m commits"
+        }
+        InputMode::Normal
+            if app
+                .current_question()
+                .is_some_and(|question| question.status != QuestionStatus::Open) =>
+        {
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  m commits"
+        }
+        InputMode::Normal => {
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  n note  i edit  / search  r review+next  m commits"
+        }
+        InputMode::Visual => "j/k move  a comment  n note  Esc cancel  v finish selection",
+        InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
+        InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
+        InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
+        InputMode::Search => {
+            "Type to fuzzy-search review notes and comment threads  Enter jump  j/k move  Esc cancel"
+        }
+    };
+    let message = app.message.as_deref().unwrap_or(hints);
+    let badge_text = format!(" {focus} ");
+    let selection = app
+        .visual_selection()
+        .map(|anchor| format!("  visual {}", anchor))
+        .unwrap_or_default();
+    let meta_text = format!(
+        "row {}{}  {}  {}/{} reviewed  {}",
+        cursor_row, selection, dirty, reviewed_count, file_count, current_path
+    );
+    let status = fit_status_segments(&badge_text, &meta_text, message, area.width as usize);
+    let line = Line::from(vec![
+        Span::styled(
+            status.badge,
+            Style::default().fg(theme().bg).bg(theme().accent),
+        ),
+        Span::raw(status.between_badge_and_meta),
+        Span::styled(status.meta, Style::default().fg(theme().muted)),
+        Span::raw(status.between_meta_and_message),
+        Span::styled(status.message, Style::default().fg(theme().text)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme().bg)),
+        area,
+    );
+}
+
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
+    if app.is_diff_mode() {
+        render_diff_status(frame, app, area);
+        return;
+    }
+
     let focus = status_mode_label(app);
     let dirty = if app.dirty { "unsaved" } else { "saved" };
     let current_notes = app.notes_for_current_line().len();
@@ -223,24 +544,27 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_default();
     let hints = match app.input_mode {
         InputMode::Normal if app.current_open_question().is_some() => {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a question  c continue  r resolve  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  c close  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Normal
             if app
                 .current_question()
                 .is_some_and(|question| question.status != QuestionStatus::Open) =>
         {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a question  o reopen  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  o reopen  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Normal => {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a question  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Visual => "j/k move  a question  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
         InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
-        InputMode::Search => "Type to fuzzy-search notes  Enter jump  j/k move  Esc cancel",
+        InputMode::Search => {
+            "Type to fuzzy-search notes and questions  Enter jump  j/k move  Esc cancel"
+        }
         InputMode::Help => "q or Esc closes help",
+        InputMode::CommitSelect => "j/k move  Space toggle range  Enter open diff  q quit",
     };
     let message = app.message.as_deref().unwrap_or(hints);
     let selection = app
@@ -361,45 +685,80 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
     let help = vec![
         Line::from(vec![Span::styled(
-            "The viewer keeps code primary and injects note cards directly below their anchors.",
+            "Source mode shows tracked files with inline notes. Diff mode adds a commit selector and unified patch browser.",
             Style::default().fg(theme().text),
         )]),
         Line::default(),
-        help_line("Tab", "toggle focus between file list and source"),
+        Line::from(Span::styled(
+            "Shared keys",
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        help_line("Tab", "toggle focus between the sidebar and the main view"),
         help_line("j / k", "move through the selected pane"),
         help_line("h / l", "switch files from the source pane"),
-        help_line("[ / ]", "jump to the previous or next annotated line"),
+        help_line("[ / ]", "jump to the previous or next note or thread"),
         help_line("PageUp / PageDown", "move by one viewport"),
         help_line("Ctrl-U / Ctrl-D", "move by half a viewport"),
-        help_line(
-            "v / V",
-            "start a visual selection for a ranged note or question",
-        ),
-        help_line("a", "open a QUESTION draft at the cursor or selected range"),
-        help_line("c", "continue the open question thread under the cursor"),
-        help_line("o", "reopen the resolved question thread under the cursor"),
+        help_line("v / V", "start a visual selection on anchorable lines"),
+        help_line("a", "open or continue the thread under the cursor"),
+        help_line("c", "close the open thread under the cursor"),
+        help_line("o", "reopen the closed thread under the cursor"),
         help_line("n", "open a NOTE draft at the cursor or selected range"),
         help_line(
             "i",
-            "edit the question under the cursor, or fall back to the note",
+            "edit the thread under the cursor, or fall back to the note",
         ),
         help_line("Esc", "leave visual mode or close the current popup"),
         help_line(
             "I",
-            "edit the note under the cursor, or fall back to the question",
+            "edit the note under the cursor, or fall back to the thread",
         ),
-        help_line("r", "resolve the open question thread under the cursor"),
-        help_line("R", "reload tracked file contents from disk"),
-        help_line("f", "open the fuzzy file picker and add a tracked file"),
-        help_line("/", "fuzzy-search notes and questions, then jump"),
+        help_line("/", "fuzzy-search notes and threads, then jump"),
         help_line(
             "dd",
-            "delete the selected file or the annotation under the cursor",
+            "delete the current annotation, or the tracked file in source mode",
         ),
         help_line("Ctrl-O", "open the current draft in $VISUAL or $EDITOR"),
         help_line("s", "save the packet to disk"),
+        Line::default(),
+        Line::from(Span::styled(
+            "Source mode",
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        help_line("f", "open the fuzzy file picker and add a tracked file"),
+        help_line("R", "reload tracked file contents from disk"),
         help_line("y", "copy the open-question export without quitting"),
         help_line("x", "save, export open questions, and quit"),
+        Line::default(),
+        Line::from(Span::styled(
+            "Diff mode",
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        help_line(
+            "--diff",
+            "start in diff mode instead of the tracked-source browser",
+        ),
+        help_line(
+            "Space",
+            "toggle a contiguous commit range, or expand/collapse hidden diff context",
+        ),
+        help_line(
+            "Enter",
+            "open the selected diff range, or expand/collapse hidden context",
+        ),
+        help_line("m", "in diff mode, reopen the commit selector"),
+        help_line("r", "mark the current diff file reviewed and jump next"),
+        help_line(
+            "y",
+            "copy a diff-review export with selected commits and your comments",
+        ),
+        help_line("x", "save, export the diff review, and quit"),
         help_line("q", "quit; press twice if there are unsaved changes"),
         help_line("?", "toggle this help"),
     ];
@@ -417,6 +776,7 @@ fn render_draft(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Clear, popup);
     let draft = app.draft.as_ref().expect("draft must exist in draft mode");
     let (title, border_color) = match draft.kind {
+        DraftKind::Question if app.is_diff_mode() => (" Comment Draft ", theme().question_border),
         DraftKind::Question => (" Question Draft ", theme().question_border),
         DraftKind::Note => (" Note Draft ", theme().note_border),
     };
@@ -440,7 +800,10 @@ fn render_draft(frame: &mut Frame, app: &mut App, area: Rect) {
     let summary = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Mode: ", Style::default().fg(theme().muted)),
-            Span::styled(draft_mode_label(draft), Style::default().fg(theme().accent)),
+            Span::styled(
+                draft_mode_label(draft, app.is_diff_mode()),
+                Style::default().fg(theme().accent),
+            ),
             Span::raw("  "),
             Span::styled("File: ", Style::default().fg(theme().muted)),
             Span::styled(draft.path.as_str(), Style::default().fg(theme().text)),
@@ -467,6 +830,7 @@ fn render_draft(frame: &mut Frame, app: &mut App, area: Rect) {
         frame,
         sections[1],
         match draft.kind {
+            DraftKind::Question if app.is_diff_mode() => " Comment ",
             DraftKind::Question => " Question ",
             DraftKind::Note => " Note ",
         },
@@ -550,7 +914,7 @@ fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
     let popup = centered_rect(area, 74, 72);
     frame.render_widget(Clear, popup);
     let block = Block::default()
-        .title(" Search Notes ")
+        .title(" Search Annotations ")
         .borders(Borders::ALL)
         .style(Style::default().bg(theme().panel).fg(theme().text))
         .border_style(Style::default().fg(theme().border_focus));
@@ -569,7 +933,7 @@ fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
     render_text_area(
         frame,
         sections[0],
-        " Search ",
+        " Search annotations ",
         &search.query.text,
         true,
         theme().border_focus,
@@ -749,7 +1113,7 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             rendered.extend(render_note_card(note, width));
         }
         for question in source_questions {
-            rendered.extend(render_question_card(question, width));
+            rendered.extend(render_question_card(question, width, false));
         }
     }
 
@@ -772,6 +1136,233 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             viewport_height: 1,
         },
     )
+}
+
+fn build_diff_lines(app: &App, width: usize) -> (Vec<Line<'static>>, DiffViewMetrics) {
+    let Some(browser) = app.diff_browser.as_ref() else {
+        return (
+            vec![Line::from(vec![Span::styled(
+                "Diff mode is unavailable",
+                Style::default().fg(theme().muted),
+            )])],
+            DiffViewMetrics {
+                file_rows: vec![0],
+                annotation_rows: Vec::new(),
+                rows: vec![DiffRow::FileHeader],
+                total_rows: 1,
+                viewport_height: 1,
+            },
+        );
+    };
+
+    if browser.files.is_empty() {
+        return (
+            vec![Line::from(vec![Span::styled(
+                "Select a commit range and press Enter to load a diff.",
+                Style::default().fg(theme().muted),
+            )])],
+            DiffViewMetrics {
+                file_rows: vec![0],
+                annotation_rows: Vec::new(),
+                rows: vec![DiffRow::FileHeader],
+                total_rows: 1,
+                viewport_height: 1,
+            },
+        );
+    }
+
+    let mut rendered = Vec::new();
+    let mut file_rows = Vec::new();
+    let mut annotation_rows = Vec::new();
+    let mut rows = Vec::new();
+
+    for (file_index, file) in browser.files.iter().enumerate() {
+        let file_selected = file_index == browser.current_file;
+        file_rows.push(rendered.len());
+        rows.push(DiffRow::FileHeader);
+        rendered.push(render_diff_file_header(
+            app,
+            file,
+            file_selected,
+            browser.cursor_row == rendered.len(),
+            app.is_diff_row_in_visual_selection(rendered.len()),
+        ));
+
+        if file.is_binary {
+            rows.push(DiffRow::FileEnd);
+            rendered.push(Line::from(vec![Span::styled(
+                "  binary file",
+                Style::default().fg(theme().muted),
+            )]));
+            continue;
+        }
+
+        if file.is_too_large {
+            rows.push(DiffRow::FileEnd);
+            rendered.push(Line::from(vec![Span::styled(
+                "  untracked file too large to render inline",
+                Style::default().fg(theme().muted),
+            )]));
+            continue;
+        }
+
+        let digits = diff_line_digits(file);
+        if file.hunks.is_empty() {
+            rows.push(DiffRow::FileEnd);
+            rendered.push(Line::from(vec![Span::styled(
+                "  no textual hunks",
+                Style::default().fg(theme().muted),
+            )]));
+        }
+
+        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            let previous_hunk = hunk_index
+                .checked_sub(1)
+                .and_then(|index| file.hunks.get(index));
+            let gap = calculate_gap(previous_hunk, hunk);
+            if gap > 0 {
+                let gap_id = super::app::GapId {
+                    file_idx: file_index,
+                    hunk_idx: hunk_index,
+                };
+                if browser.expanded_gaps.contains(&gap_id) {
+                    if let Some(expanded_lines) = browser.expanded_content.get(&gap_id) {
+                        for (context_idx, context_line) in expanded_lines.iter().enumerate() {
+                            let row = rendered.len();
+                            rows.push(DiffRow::ExpandedContext {
+                                file_idx: file_index,
+                                gap_id: gap_id.clone(),
+                                context_idx,
+                            });
+                            rendered.push(render_diff_line(
+                                context_line,
+                                digits,
+                                browser.cursor_row == row,
+                                app.is_diff_row_in_visual_selection(row),
+                            ));
+                            append_diff_annotations(
+                                app,
+                                file,
+                                context_line.new_lineno,
+                                width,
+                                &mut rendered,
+                                &mut annotation_rows,
+                                &mut rows,
+                            );
+                        }
+                    }
+                } else {
+                    let row = rendered.len();
+                    rows.push(DiffRow::GapExpander {
+                        gap_id: gap_id.clone(),
+                    });
+                    rendered.push(render_diff_gap_line(
+                        gap,
+                        browser.cursor_row == row,
+                        app.is_diff_row_in_visual_selection(row),
+                    ));
+                }
+            }
+
+            let hunk_row = rendered.len();
+            rows.push(DiffRow::HunkHeader);
+            rendered.push(render_diff_hunk_header(
+                hunk,
+                browser.cursor_row == hunk_row,
+                app.is_diff_row_in_visual_selection(hunk_row),
+            ));
+
+            for (line_idx, diff_line) in hunk.lines.iter().enumerate() {
+                let row = rendered.len();
+                rows.push(DiffRow::DiffLine {
+                    file_idx: file_index,
+                    hunk_idx: hunk_index,
+                    line_idx,
+                });
+                rendered.push(render_diff_line(
+                    diff_line,
+                    digits,
+                    browser.cursor_row == row,
+                    app.is_diff_row_in_visual_selection(row),
+                ));
+                append_diff_annotations(
+                    app,
+                    file,
+                    diff_line.new_lineno,
+                    width,
+                    &mut rendered,
+                    &mut annotation_rows,
+                    &mut rows,
+                );
+            }
+        }
+
+        rows.push(DiffRow::FileEnd);
+        rendered.push(Line::from(vec![Span::styled(
+            format!("─ end of {} ─", file.display_path()),
+            Style::default().fg(theme().muted),
+        )]));
+    }
+
+    let total_rows = rendered.len().max(1);
+    (
+        rendered,
+        DiffViewMetrics {
+            file_rows,
+            annotation_rows,
+            rows,
+            total_rows,
+            viewport_height: 1,
+        },
+    )
+}
+
+fn append_diff_annotations(
+    app: &App,
+    file: &DiffFile,
+    line_no: Option<usize>,
+    width: usize,
+    rendered: &mut Vec<Line<'static>>,
+    annotation_rows: &mut Vec<usize>,
+    rows: &mut Vec<DiffRow>,
+) {
+    let Some(line_no) = line_no else {
+        return;
+    };
+    let Some(path) = file.new_path.as_deref() else {
+        return;
+    };
+    let source_notes = app
+        .notes_for_path(path)
+        .into_iter()
+        .filter(|note| super::app::anchor_display_line(note.anchor) == line_no)
+        .collect::<Vec<_>>();
+    let source_questions = app
+        .questions_for_path(path)
+        .into_iter()
+        .filter(|question| question.anchor.map(super::app::anchor_display_line) == Some(line_no))
+        .collect::<Vec<_>>();
+
+    for note in source_notes {
+        annotation_rows.push(rendered.len());
+        for line in render_note_card(note, width) {
+            rendered.push(line);
+            rows.push(DiffRow::Annotation {
+                path: path.to_string(),
+                line_no,
+            });
+        }
+    }
+    for question in source_questions {
+        annotation_rows.push(rendered.len());
+        for line in render_question_card(question, width, true) {
+            rendered.push(line);
+            rows.push(DiffRow::Annotation {
+                path: path.to_string(),
+                line_no,
+            });
+        }
+    }
 }
 
 fn render_source_line(
@@ -836,6 +1427,170 @@ fn render_source_line(
     Line::from(spans)
 }
 
+fn render_diff_file_header(
+    app: &App,
+    file: &DiffFile,
+    file_selected: bool,
+    cursor_selected: bool,
+    in_visual_selection: bool,
+) -> Line<'static> {
+    let bg = match (cursor_selected, in_visual_selection) {
+        (true, true) => blend_color(theme().panel, theme().border_focus, 28),
+        (true, false) => theme().cursor_line,
+        (false, true) => blend_color(theme().panel, theme().border_focus, 18),
+        (false, false) => theme().panel,
+    };
+    let label_style = Style::default()
+        .fg(theme().text)
+        .bg(bg)
+        .add_modifier(if file_selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    let note_count = app.file_note_count(file.display_path());
+    let question_count = app.file_open_question_count(file.display_path());
+    let review_mark = if app.is_current_diff_file_reviewed(file.display_path()) {
+        "✓ "
+    } else {
+        ""
+    };
+    Line::from(vec![
+        Span::styled(
+            "▸ ",
+            Style::default()
+                .fg(if file_selected {
+                    theme().accent
+                } else {
+                    theme().border
+                })
+                .bg(bg),
+        ),
+        Span::styled(
+            file.status.as_char().to_string(),
+            Style::default()
+                .fg(match file.status.as_char() {
+                    'A' | 'C' => theme().success,
+                    'D' => theme().danger,
+                    _ => theme().accent,
+                })
+                .bg(bg),
+        ),
+        Span::styled(" ", Style::default().bg(bg)),
+        Span::styled(review_mark, Style::default().fg(theme().success).bg(bg)),
+        Span::styled(file.display_path().to_string(), label_style),
+        Span::styled(
+            format!("  {note_count}n {question_count}c"),
+            Style::default().fg(theme().muted).bg(bg),
+        ),
+    ])
+}
+
+fn render_diff_gap_line(gap: usize, selected: bool, in_visual_selection: bool) -> Line<'static> {
+    let base_bg = blend_color(theme().panel, theme().border, 8);
+    let bg = match (selected, in_visual_selection) {
+        (true, true) => blend_color(base_bg, theme().border_focus, 28),
+        (true, false) => blend_color(theme().panel, theme().border_focus, 16),
+        (false, true) => blend_color(base_bg, theme().border_focus, 18),
+        (false, false) => base_bg,
+    };
+    Line::from(vec![Span::styled(
+        format!("       ... expand ({gap} lines) ..."),
+        Style::default().fg(theme().muted).bg(bg),
+    )])
+}
+
+fn render_diff_hunk_header(
+    hunk: &crate::diff::DiffHunk,
+    selected: bool,
+    in_visual_selection: bool,
+) -> Line<'static> {
+    let base_bg = blend_color(theme().panel, theme().border, 10);
+    let bg = match (selected, in_visual_selection) {
+        (true, true) => blend_color(base_bg, theme().border_focus, 28),
+        (true, false) => blend_color(theme().panel, theme().border_focus, 20),
+        (false, true) => blend_color(base_bg, theme().border_focus, 18),
+        (false, false) => base_bg,
+    };
+    Line::from(vec![Span::styled(
+        format!("  {}", hunk.header),
+        Style::default().fg(theme().muted).bg(bg),
+    )])
+}
+
+fn render_diff_line(
+    diff_line: &DiffLine,
+    digits: usize,
+    selected: bool,
+    in_visual_selection: bool,
+) -> Line<'static> {
+    let base_bg = match diff_line.origin {
+        LineOrigin::Context => theme().panel,
+        LineOrigin::Addition => blend_color(theme().panel, theme().success, 14),
+        LineOrigin::Deletion => blend_color(theme().panel, theme().danger, 14),
+    };
+    let bg = match (selected, in_visual_selection) {
+        (true, true) => blend_color(base_bg, theme().border_focus, 30),
+        (true, false) => blend_color(base_bg, theme().border_focus, 24),
+        (false, true) => blend_color(base_bg, theme().border_focus, 16),
+        (false, false) => base_bg,
+    };
+    let prefix_fg = match diff_line.origin {
+        LineOrigin::Context => theme().muted,
+        LineOrigin::Addition => theme().success,
+        LineOrigin::Deletion => theme().danger,
+    };
+    let prefix = match diff_line.origin {
+        LineOrigin::Context => ' ',
+        LineOrigin::Addition => '+',
+        LineOrigin::Deletion => '-',
+    };
+    let old_lineno = diff_line
+        .old_lineno
+        .map(|line| format!("{line:>digits$}", digits = digits))
+        .unwrap_or_else(|| " ".repeat(digits));
+    let new_lineno = diff_line
+        .new_lineno
+        .map(|line| format!("{line:>digits$}", digits = digits))
+        .unwrap_or_else(|| " ".repeat(digits));
+
+    let mut spans = vec![
+        Span::styled(old_lineno, Style::default().fg(theme().muted).bg(bg)),
+        Span::styled(" ", Style::default().bg(bg)),
+        Span::styled(new_lineno, Style::default().fg(theme().muted).bg(bg)),
+        Span::styled(" │ ", Style::default().fg(theme().border).bg(bg)),
+        Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
+        Span::styled(" ", Style::default().bg(bg)),
+    ];
+
+    if diff_line.segments.is_empty() {
+        spans.push(Span::styled(
+            diff_line.content.clone(),
+            Style::default().fg(theme().text).bg(bg),
+        ));
+    } else {
+        spans.extend(diff_line.segments.iter().map(|(style, text)| {
+            let mut patched = *style;
+            patched = patched.bg(bg);
+            Span::styled(text.clone(), patched)
+        }));
+    }
+
+    Line::from(spans)
+}
+
+fn diff_line_digits(file: &DiffFile) -> usize {
+    file.hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .flat_map(|line| [line.old_lineno, line.new_lineno])
+        .flatten()
+        .max()
+        .unwrap_or(1)
+        .to_string()
+        .len()
+}
+
 fn render_note_card(note: &Note, width: usize) -> Vec<Line<'static>> {
     let title = format!(
         "{} note · {} · lines {}",
@@ -876,24 +1631,34 @@ fn render_note_card(note: &Note, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>> {
+fn render_question_card(
+    question: &Question,
+    width: usize,
+    comment_mode: bool,
+) -> Vec<Line<'static>> {
     let (border_color, background) = question_status_style(question.status);
     let status = question_status_label(question.status);
     let reply_count = question.conversation.len();
+    let thread_kind = if comment_mode {
+        "comment thread"
+    } else {
+        "question thread"
+    };
     let title = question
         .anchor
         .map(|anchor| {
             format!(
-                "{} thread · line {} · {} message{}",
+                "{} {} · line {} · {} message{}",
                 status,
+                thread_kind,
                 anchor,
                 reply_count,
                 if reply_count == 1 { "" } else { "s" }
             )
         })
-        .unwrap_or_else(|| format!("{status} thread"));
+        .unwrap_or_else(|| format!("{status} {thread_kind}"));
     let mut lines = render_card(
-        "Question",
+        if comment_mode { "Comment" } else { "Question" },
         &title,
         &question.prompt,
         question.related_note_ids.as_slice(),
@@ -907,7 +1672,7 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
             Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled("╭─ ", Style::default().fg(border_color).bg(background)),
             Span::styled(
-                question_status_header(question.status),
+                question_status_header(question.status, comment_mode),
                 Style::default()
                     .fg(theme().text)
                     .bg(background)
@@ -920,7 +1685,7 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
         ]),
     );
     for message in &question.conversation {
-        lines.extend(render_question_message_card(message, width));
+        lines.extend(render_question_message_card(message, width, comment_mode));
     }
     if question.status == QuestionStatus::Open {
         lines.push(Line::from(vec![
@@ -932,7 +1697,11 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
                     .bg(theme().panel),
             ),
             Span::styled(
-                "Actions: c continue thread  r resolve",
+                if comment_mode {
+                    "Actions: a reply  c close thread"
+                } else {
+                    "Actions: a continue thread  c close thread"
+                },
                 Style::default().fg(theme().muted).bg(theme().panel),
             ),
         ]));
@@ -952,11 +1721,15 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
     lines
 }
 
-fn render_question_message_card(message: &QuestionMessage, width: usize) -> Vec<Line<'static>> {
+fn render_question_message_card(
+    message: &QuestionMessage,
+    width: usize,
+    comment_mode: bool,
+) -> Vec<Line<'static>> {
     let (border_color, background) = question_message_style(message.role);
     render_card(
         message.role.label(),
-        message_role_subtitle(message.role),
+        message_role_subtitle(message.role, comment_mode),
         &message.body,
         &[],
         width,
@@ -1101,10 +1874,17 @@ fn question_status_style(status: QuestionStatus) -> (Color, Color) {
     }
 }
 
-fn question_status_header(status: QuestionStatus) -> &'static str {
+fn question_status_header(status: QuestionStatus, comment_mode: bool) -> &'static str {
+    if comment_mode {
+        return match status {
+            QuestionStatus::Open => "Open Comment Thread",
+            QuestionStatus::Answered => "Closed Comment Thread",
+            QuestionStatus::Archived => "Archived Comment Thread",
+        };
+    }
     match status {
         QuestionStatus::Open => "Open Question",
-        QuestionStatus::Answered => "Resolved Conversation",
+        QuestionStatus::Answered => "Closed Conversation",
         QuestionStatus::Archived => "Archived Conversation",
     }
 }
@@ -1112,7 +1892,7 @@ fn question_status_header(status: QuestionStatus) -> &'static str {
 fn question_status_label(status: QuestionStatus) -> &'static str {
     match status {
         QuestionStatus::Open => "open",
-        QuestionStatus::Answered => "resolved",
+        QuestionStatus::Answered => "closed",
         QuestionStatus::Archived => "archived",
     }
 }
@@ -1130,7 +1910,13 @@ fn question_message_style(role: QuestionMessageRole) -> (Color, Color) {
     }
 }
 
-fn message_role_subtitle(role: QuestionMessageRole) -> &'static str {
+fn message_role_subtitle(role: QuestionMessageRole, comment_mode: bool) -> &'static str {
+    if comment_mode {
+        return match role {
+            QuestionMessageRole::User => "comment reply",
+            QuestionMessageRole::Agent => "agent reply",
+        };
+    }
     match role {
         QuestionMessageRole::User => "user follow-up",
         QuestionMessageRole::Agent => "agent answer",
@@ -1323,7 +2109,7 @@ fn border_style(focused: bool) -> Style {
     }
 }
 
-fn draft_mode_label(draft: &PromptDraft) -> String {
+fn draft_mode_label(draft: &PromptDraft, diff_mode: bool) -> String {
     let target = match draft.target {
         DraftTarget::New => "new",
         DraftTarget::ContinueQuestion { .. } => "continue",
@@ -1332,7 +2118,10 @@ fn draft_mode_label(draft: &PromptDraft) -> String {
         | DraftTarget::EditQuestionMessage { .. } => "edit",
     };
     match draft.kind {
-        DraftKind::Question => format!("{target} question"),
+        DraftKind::Question => format!(
+            "{target} {}",
+            if diff_mode { "comment" } else { "question" }
+        ),
         DraftKind::Note => format!("{target} note"),
     }
 }
@@ -1340,21 +2129,40 @@ fn draft_mode_label(draft: &PromptDraft) -> String {
 fn status_mode_label(app: &App) -> String {
     match app.input_mode {
         InputMode::Normal => match app.focus {
-            FocusPane::Files => "files".to_string(),
-            FocusPane::Source => "source".to_string(),
+            FocusPane::Files => {
+                if app.is_diff_mode() {
+                    "changed".to_string()
+                } else {
+                    "files".to_string()
+                }
+            }
+            FocusPane::Source => {
+                if app.is_diff_mode() {
+                    "diff".to_string()
+                } else {
+                    "source".to_string()
+                }
+            }
         },
         InputMode::Visual => "visual".to_string(),
         InputMode::Draft | InputMode::DraftConfirm => app
             .draft
             .as_ref()
             .map(|draft| match draft.kind {
-                DraftKind::Question => "question".to_string(),
+                DraftKind::Question => {
+                    if app.is_diff_mode() {
+                        "comment".to_string()
+                    } else {
+                        "question".to_string()
+                    }
+                }
                 DraftKind::Note => "note".to_string(),
             })
             .unwrap_or_else(|| "draft".to_string()),
         InputMode::FilePicker => "files".to_string(),
         InputMode::Search => "search".to_string(),
         InputMode::Help => "help".to_string(),
+        InputMode::CommitSelect => "commits".to_string(),
     }
 }
 
@@ -1481,7 +2289,7 @@ mod tests {
         let status = fit_status_segments(
             " source ",
             "line 128  unsaved  3 attached notes  thread open",
-            "Tab focus  j/k move  [] jump  v select  dd delete  a question  c continue  r resolve  R reload  n note",
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  c close  R reload  n note",
             48,
         );
         let rendered = format!(
