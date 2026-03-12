@@ -13,9 +13,10 @@ Set PlaybackSpeed 1.1
 Hide
 Type "cd /home/inm/open-source-project/copanion" Enter
 Type "export XDG_DATA_HOME=$(mktemp -d)" Enter
+Type "export PATH=/home/inm/open-source-project/copanion/target/release:$PATH" Enter
 Show
 
-Type "./target/release/copanion --stdout" Enter
+Type "copanion" Enter
 Sleep 1s
 
 Type "src/tui/app.rs"
@@ -53,4 +54,9 @@ Type "]"
 Sleep 900ms
 
 Type "x"
-Sleep 3s
+Sleep 2s
+
+Type 'codex --no-alt-screen "$(wl-paste)"' Enter
+Sleep 4s
+Ctrl+C
+Sleep 1s
