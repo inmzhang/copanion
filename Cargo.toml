@@ -2,7 +2,7 @@
 name = "copanion"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A Rust CLI/TUI for attaching learning notes to source files and exporting structured follow-up questions for coding agents."
 license = "MIT"
 repository = "https://github.com/inmzhang/copanion"
@@ -24,10 +24,10 @@ nucleo-matcher = "0.3.1"
 ratatui = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 syntect = "5.3"
-toml = "0.8"
+toml = "1.0"
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }
 unicode-width = "0.2"
-uuid = { version = "1.18", features = ["v4", "serde"] }
+uuid = { version = "1.22", features = ["v4", "serde"] }
 
 [dev-dependencies]
-tempfile = "3.23"
+tempfile = "3.27"
