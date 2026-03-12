@@ -15,7 +15,10 @@ pub fn generate_question_export(packet: &Packet, packet_path: &Path) -> Result<S
     output.push_str("# Copanion Follow-up\n\n");
     output.push_str("Please answer the open question threads below.\n\n");
     output.push_str(&format!("Packet: {}\n", packet.title));
-    output.push_str(&format!("Canonical packet path: {}\n", packet_path.display()));
+    output.push_str(&format!(
+        "Canonical packet path: {}\n",
+        packet_path.display()
+    ));
     output.push_str(&format!("Project root: {}\n\n", packet.workspace_root));
 
     output.push_str("Files in focus:\n");

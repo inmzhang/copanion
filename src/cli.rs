@@ -171,7 +171,9 @@ fn build_packet(
                 packet.session_id = packet_id.clone();
                 changed = true;
             }
-            if let Some(title) = title_override && packet.title != title {
+            if let Some(title) = title_override
+                && packet.title != title
+            {
                 packet.title = title;
                 changed = true;
             }

@@ -167,7 +167,10 @@ mod tests {
         };
         let packet = paths.project_packet_path(Path::new("/workspace/repo"));
         assert!(packet.starts_with(paths.packets_dir));
-        assert_eq!(packet.extension().and_then(|ext| ext.to_str()), Some("toml"));
+        assert_eq!(
+            packet.extension().and_then(|ext| ext.to_str()),
+            Some("toml")
+        );
     }
 
     #[test]

@@ -62,7 +62,11 @@ pub fn read_plan(path_arg: &str) -> Result<AgentResponsePlan> {
     serde_json::from_str(&raw).context("failed to parse the response plan as JSON")
 }
 
-pub fn apply_plan(packet: &mut Packet, repo_root: &Path, plan: AgentResponsePlan) -> Result<ApplySummary> {
+pub fn apply_plan(
+    packet: &mut Packet,
+    repo_root: &Path,
+    plan: AgentResponsePlan,
+) -> Result<ApplySummary> {
     let mut summary = ApplySummary::default();
 
     for answer in plan.answers {

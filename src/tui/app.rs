@@ -42,10 +42,19 @@ pub enum DraftKind {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DraftTarget {
     New,
-    EditNote { index: usize },
-    EditQuestionPrompt { index: usize },
-    EditQuestionMessage { question_index: usize, message_index: usize },
-    ContinueQuestion { index: usize },
+    EditNote {
+        index: usize,
+    },
+    EditQuestionPrompt {
+        index: usize,
+    },
+    EditQuestionMessage {
+        question_index: usize,
+        message_index: usize,
+    },
+    ContinueQuestion {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -295,8 +304,9 @@ impl App {
             return;
         }
         let Some(index) = self.current_open_question_index() else {
-            self.message =
-                Some("there is no open question thread on the current line to continue".to_string());
+            self.message = Some(
+                "there is no open question thread on the current line to continue".to_string(),
+            );
             return;
         };
         let question = &self.packet.questions[index];
@@ -315,8 +325,7 @@ impl App {
         });
         self.input_mode = InputMode::Draft;
         self.message = Some(
-            "continue the conversation; Ctrl-S saves, Ctrl-O opens the external editor"
-                .to_string(),
+            "continue the conversation; Ctrl-S saves, Ctrl-O opens the external editor".to_string(),
         );
     }
 

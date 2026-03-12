@@ -278,7 +278,12 @@ struct StatusSegments {
     message: String,
 }
 
-fn fit_status_segments(badge: &str, meta: &str, message: &str, total_width: usize) -> StatusSegments {
+fn fit_status_segments(
+    badge: &str,
+    meta: &str,
+    message: &str,
+    total_width: usize,
+) -> StatusSegments {
     let badge = truncate_to_width_end(badge, total_width);
     let badge_width = UnicodeWidthStr::width(badge.as_str());
     let remaining_after_badge = total_width.saturating_sub(badge_width);
@@ -898,12 +903,7 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
         0,
         Line::from(vec![
             Span::styled("  ", Style::default().bg(theme().panel)),
-            Span::styled(
-                "╭─ ",
-                Style::default()
-                    .fg(border_color)
-                    .bg(background),
-            ),
+            Span::styled("╭─ ", Style::default().fg(border_color).bg(background)),
             Span::styled(
                 question_status_header(question.status),
                 Style::default()
@@ -925,7 +925,9 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
             Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled(
                 "↳ ",
-                Style::default().fg(theme().question_border).bg(theme().panel),
+                Style::default()
+                    .fg(theme().question_border)
+                    .bg(theme().panel),
             ),
             Span::styled(
                 "Actions: c continue thread  r resolve",
@@ -935,7 +937,10 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
     } else {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().bg(theme().panel)),
-            Span::styled("↳ ", Style::default().fg(theme().note_border).bg(theme().panel)),
+            Span::styled(
+                "↳ ",
+                Style::default().fg(theme().note_border).bg(theme().panel),
+            ),
             Span::styled(
                 "Actions: o reopen thread",
                 Style::default().fg(theme().muted).bg(theme().panel),
