@@ -236,14 +236,24 @@ impl App {
         self.ensure_cursor_visible();
     }
 
+    fn viewport_step(&self, divisor: usize) -> isize {
+        (self.view_metrics.viewport_height / divisor).max(1) as isize
+    }
+
     pub fn page_down(&mut self) {
-        let step = self.view_metrics.viewport_height.max(1) as isize;
-        self.move_cursor(step);
+        self.move_cursor(self.viewport_step(1));
     }
 
     pub fn page_up(&mut self) {
-        let step = self.view_metrics.viewport_height.max(1) as isize;
-        self.move_cursor(-step);
+        self.move_cursor(-self.viewport_step(1));
+    }
+
+    pub fn half_page_down(&mut self) {
+        self.move_cursor(self.viewport_step(2));
+    }
+
+    pub fn half_page_up(&mut self) {
+        self.move_cursor(-self.viewport_step(2));
     }
 
     pub fn move_file(&mut self, delta: isize) {
@@ -1673,6 +1683,52 @@ mod tests {
         assert!(app.commit_file_picker_selection());
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.current_path(), "src/main.rs");
+    }
+
+    #[test]
+    fn half_page_navigation_moves_by_half_the_viewport_height() {
+        let temp = tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("main.rs"),
+            (1..=20)
+                .map(|line| format!("line {line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.view_metrics.viewport_height = 6;
+
+        app.half_page_down();
+        assert_eq!(app.cursor_line, 4);
+
+        app.half_page_up();
+        assert_eq!(app.cursor_line, 1);
+    }
+
+    #[test]
+    fn half_page_navigation_uses_a_minimum_step_of_one_line() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.view_metrics.viewport_height = 1;
+
+        app.half_page_down();
+        assert_eq!(app.cursor_line, 2);
+
+        app.half_page_up();
+        assert_eq!(app.cursor_line, 1);
     }
 
     #[test]

@@ -369,6 +369,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         help_line("j / k", "move through the selected pane"),
         help_line("h / l", "switch files from the source pane"),
         help_line("[ / ]", "jump to the previous or next annotated line"),
+        help_line("PageUp / PageDown", "move by one viewport"),
+        help_line("Ctrl-U / Ctrl-D", "move by half a viewport"),
         help_line(
             "v / V",
             "start a visual selection for a ranged note or question",

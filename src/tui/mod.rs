@@ -67,7 +67,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                     if app.input_mode == InputMode::Normal {
                         if pending_d {
                             pending_d = false;
-                            if key.code == KeyCode::Char('d') {
+                            if is_plain_char(key, 'd') {
                                 match app.focus {
                                     FocusPane::Files => {
                                         app.delete_current_file();
@@ -80,7 +80,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                             }
                         }
 
-                        if key.code == KeyCode::Char('d') {
+                        if is_plain_char(key, 'd') {
                             pending_d = true;
                             app.message = Some(match app.focus {
                                 FocusPane::Files => {
@@ -141,6 +141,10 @@ fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<
     Ok(())
 }
 
+fn is_plain_char(key: KeyEvent, ch: char) -> bool {
+    key.modifiers.is_empty() && matches!(key.code, KeyCode::Char(code) if code == ch)
+}
+
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
@@ -155,6 +159,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     app.clear_message();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => {
+                app.half_page_down();
+                return Ok(());
+            }
+            KeyCode::Char('u') => {
+                app.half_page_up();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Tab => app.toggle_focus(),
         KeyCode::Char('?') => app.input_mode = InputMode::Help,
@@ -201,6 +219,20 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_visual_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     app.clear_message();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => {
+                app.half_page_down();
+                return Ok(());
+            }
+            KeyCode::Char('u') => {
+                app.half_page_up();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Esc | KeyCode::Char('v') | KeyCode::Char('V') => app.exit_visual_mode(),
         KeyCode::Char('j') | KeyCode::Down => app.move_cursor(1),
@@ -409,4 +441,23 @@ fn edit_draft_in_editor(
     draft.buffer = self::app::TextBuffer::from_text(edited);
     app.message = Some("draft updated from the external editor".to_string());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::is_plain_char;
+
+    #[test]
+    fn plain_char_helper_rejects_control_modified_keys() {
+        assert!(is_plain_char(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            'd'
+        ));
+        assert!(!is_plain_char(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            'd'
+        ));
+    }
 }

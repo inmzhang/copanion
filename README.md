@@ -32,18 +32,6 @@ If a packet has no tracked files yet, `copanion` opens directly into the fuzzy f
 
 The important point is that the thread stays durable. The root question, the agent answer, and later follow-up questions all live in one place and remain attached to the same code anchor.
 
-## Thread Model
-
-Question communication in Copanion is thread-shaped, not one-shot:
-
-- A root question is created from the cursor or a visual range.
-- Agent replies are written back as conversation cards under that same question.
-- User follow-ups extend the same thread instead of creating disconnected duplicate questions.
-- A thread can be `open`, `resolved`, or reopened later.
-- Export only includes the open threads that still need another agent reply.
-
-This keeps the conversation state aligned with the code instead of scattering it across clipboard history, chat logs, and ad hoc markdown.
-
 ## Features
 
 - **Inline notes and question threads** - Attach notes or threaded follow-up questions to exact lines or selected ranges.
@@ -79,55 +67,23 @@ This repo ships the same Copanion workflow for both Codex and Claude Code.
 
 #### Codex
 
-The Codex skill lives at `.agents/skills/copanion`.
-
-If you run Codex inside this repository, no extra installation step is needed. Codex will discover the repo-local skill automatically from `.agents/skills/copanion`.
-
-If you want the same skill layout in another repository, copy or symlink the folder into that repo:
+To install the skill for Codex:
 
 ```bash
-mkdir -p /path/to/other-repo/.agents/skills
-ln -sfn /path/to/copanion/.agents/skills/copanion /path/to/other-repo/.agents/skills/copanion
+cp -r "$(pwd)/.agents/skills/copanion" ~/.codex/skills/copanion
 ```
-
-To make the skill available in every Codex session on your machine, install it under `~/.codex/skills`:
-
-```bash
-mkdir -p ~/.codex/skills
-ln -sfn "$(pwd)/.agents/skills/copanion" ~/.codex/skills/copanion
-```
-
-Restart Codex or open a new Codex session after adding the skill so it can be discovered cleanly.
 
 #### Claude Code
 
-Claude Code cannot discover `.agents/skills` directly, so this repo also ships:
-
-- a repo-local Claude skill mirror at `.claude/skills/copanion`
-- a portable Claude plugin/skill bundle at `.claude/skill`
-
-For a Claude session running inside this repository, use the repo-local mirror under `.claude/skills/copanion`.
-
-To install the skill globally for Claude Code, copy the portable bundle into `~/.claude/skills/copanion`:
+To install the skill for Claude Code:
 
 ```bash
-mkdir -p ~/.claude/skills
+# Option 1:
 cp -r "$(pwd)/.claude/skill" ~/.claude/skills/copanion
+
+# Option 2:
+claude skill add "$(pwd)/.claude/skill"
 ```
-
-For a single Claude session without copying files, point Claude at the bundle explicitly:
-
-```bash
-claude --plugin-dir "$(pwd)/.claude/skill"
-```
-
-You can also validate the plugin manifest before installing it:
-
-```bash
-claude plugins validate ./.claude/skill
-```
-
-Open a new Claude session after installing the global copy so the skill is discovered from `~/.claude/skills/copanion`.
 
 ## Usage
 
@@ -208,6 +164,7 @@ Only `theme` is currently recognized. Unknown keys are ignored with a startup wa
 | `g` / `G` | Jump to the first or last line |
 | `[` / `]` | Jump to the previous or next annotated line |
 | `PageUp` / `PageDown` | Scroll by page |
+| `Ctrl-u` / `Ctrl-d` | Scroll by half a page |
 | `?` | Toggle help |
 
 ### Notes And Questions
@@ -238,28 +195,3 @@ Only `theme` is currently recognized. Unknown keys are ignored with a startup wa
 | `y` | Export open question threads that still need an agent reply without quitting |
 | `x` | Save, export unresolved threads, and quit |
 | `q` | Quit, with a discard guard if there are unsaved changes |
-
-## Agent Round-Trip
-
-Agents are a first-class part of the intended workflow, but Copanion keeps their role narrow and durable.
-
-Exported follow-ups include:
-
-- the canonical packet path
-- stable question ids
-- the current conversation thread for each question
-
-The exported text is intentionally compact. It focuses on the actual question threads and the code context they depend on. The procedural details for how an agent should write answers back into Copanion live in the repo-local or globally installed `copanion` Codex skill, not in every copied export blob.
-
-Once an agent writes answers back into the packet, reopening the TUI shows the thread as a conversation attached to the source. From there you can:
-
-- press `c` to continue the same thread with another follow-up
-- press `o` to reopen a previously resolved thread
-- press `r` to mark the thread resolved so it stops appearing in future exports
-
-The result is a tighter learning loop:
-
-- the user reads and asks questions inside Copanion
-- the agent answers with the same code anchor and thread identity preserved
-- the user comes back to the source view with the answer already attached to the relevant lines
-- the next follow-up happens in the same thread instead of starting over from scratch
