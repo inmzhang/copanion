@@ -42,6 +42,7 @@ pub fn run(packet_path: &Path, output_to_stdout: bool) -> Result<()> {
 }
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+    let mut pending_d = false;
     loop {
         terminal.draw(|frame| render::render(frame, app))?;
 
@@ -51,8 +52,46 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key)?,
-                Event::Resize(_, _) => app.clear_message(),
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.input_mode == InputMode::Normal {
+                        if pending_d {
+                            pending_d = false;
+                            if key.code == KeyCode::Char('d') {
+                                match app.focus {
+                                    FocusPane::Files => {
+                                        app.delete_current_file();
+                                    }
+                                    FocusPane::Source => {
+                                        app.delete_annotation_at_cursor();
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+
+                        if key.code == KeyCode::Char('d') {
+                            pending_d = true;
+                            app.message = Some(match app.focus {
+                                FocusPane::Files => {
+                                    "press d again to remove the selected file from this session"
+                                }
+                                FocusPane::Source => {
+                                    "press d again to delete the note or question at the current line"
+                                }
+                            }
+                            .to_string());
+                            continue;
+                        }
+                    } else {
+                        pending_d = false;
+                    }
+
+                    handle_key(app, key)?
+                }
+                Event::Resize(_, _) => {
+                    pending_d = false;
+                    app.clear_message();
+                }
                 _ => {}
             }
         }
@@ -79,6 +118,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
         InputMode::QuestionComposer => handle_composer_mode(app, key),
+        InputMode::FilePicker => handle_file_picker_mode(app, key),
+        InputMode::Search => handle_search_mode(app, key),
         InputMode::Help => handle_help_mode(app, key),
     }
 }
@@ -106,6 +147,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::PageDown => app.page_down(),
         KeyCode::PageUp => app.page_up(),
         KeyCode::Char('a') => app.begin_question(),
+        KeyCode::Char('f') => app.begin_file_picker()?,
+        KeyCode::Char('/') => app.begin_search(),
         KeyCode::Char('r') => app.reload_sources()?,
         KeyCode::Char('s') => app.save()?,
         KeyCode::Char('y') => app.export_questions()?,
@@ -142,6 +185,60 @@ fn handle_composer_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_file_picker_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => app.cancel_file_picker(),
+        KeyCode::Enter => {
+            app.commit_file_picker_selection();
+        }
+        KeyCode::Char('j') | KeyCode::Down => app.move_file_picker_selection(1),
+        KeyCode::Char('k') | KeyCode::Up => app.move_file_picker_selection(-1),
+        KeyCode::Backspace => {
+            app.active_file_picker_buffer_mut().backspace();
+            app.refresh_file_picker_matches();
+        }
+        KeyCode::Home => app.active_file_picker_buffer_mut().move_home(),
+        KeyCode::End => app.active_file_picker_buffer_mut().move_end(),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.active_file_picker_buffer_mut().clear();
+            app.refresh_file_picker_matches();
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.active_file_picker_buffer_mut().insert(ch);
+            app.refresh_file_picker_matches();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_search_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => app.cancel_search(),
+        KeyCode::Enter => {
+            app.commit_search_selection();
+        }
+        KeyCode::Char('j') | KeyCode::Down => app.move_search_selection(1),
+        KeyCode::Char('k') | KeyCode::Up => app.move_search_selection(-1),
+        KeyCode::Backspace => {
+            app.active_search_buffer_mut().backspace();
+            app.refresh_search_matches();
+        }
+        KeyCode::Home => app.active_search_buffer_mut().move_home(),
+        KeyCode::End => app.active_search_buffer_mut().move_end(),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.active_search_buffer_mut().clear();
+            app.refresh_search_matches();
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.active_search_buffer_mut().insert(ch);
+            app.refresh_search_matches();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
@@ -150,6 +247,14 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('a') => {
             app.input_mode = InputMode::Normal;
             app.begin_question();
+        }
+        KeyCode::Char('f') => {
+            app.input_mode = InputMode::Normal;
+            app.begin_file_picker()?;
+        }
+        KeyCode::Char('/') => {
+            app.input_mode = InputMode::Normal;
+            app.begin_search();
         }
         KeyCode::Char('x') => {
             app.input_mode = InputMode::Normal;

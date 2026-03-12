@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{Note, NoteKind, NoteSource, Question};
 
-use super::app::{App, ComposerField, FocusPane, InputMode, ViewMetrics};
+use super::app::{App, ComposerField, FilePickerState, FocusPane, InputMode, ViewMetrics};
 
 #[derive(Clone, Copy)]
 struct Theme {
@@ -67,6 +67,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.input_mode {
         InputMode::Help => render_help(frame, sections[1]),
         InputMode::QuestionComposer => render_composer(frame, app, sections[1]),
+        InputMode::FilePicker => render_file_picker(frame, app, sections[1]),
+        InputMode::Search => render_search(frame, app, sections[1]),
         InputMode::Normal => {}
     }
 
@@ -215,11 +217,13 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let current_notes = app.notes_for_current_line().len();
     let hints = match app.input_mode {
         InputMode::Normal => {
-            "Tab focus  j/k move  [/] annotations  a ask  s save  y export  x save+quit  ? help"
+            "Tab focus  j/k move  dd delete  f add file  / search notes  a ask  s save  x save+quit"
         }
         InputMode::QuestionComposer => {
             "Type your question  Tab switch field  Ctrl-S save question  Esc cancel"
         }
+        InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
+        InputMode::Search => "Type to fuzzy-search notes  Enter jump  j/k move  Esc cancel",
         InputMode::Help => "q or Esc closes help",
     };
     let message = app.message.as_deref().unwrap_or(hints);
@@ -267,6 +271,12 @@ fn render_help(frame: &mut Frame, area: Rect) {
         help_line("h / l", "switch files from the source pane"),
         help_line("[ / ]", "jump to the previous or next annotated line"),
         help_line("a", "open the question composer at the current source line"),
+        help_line("f", "open the fuzzy file picker and add a tracked file"),
+        help_line("/", "fuzzy-search notes and questions, then jump"),
+        help_line(
+            "dd",
+            "delete the selected file or the annotation under the cursor",
+        ),
         help_line("r", "reload tracked source files from disk"),
         help_line("s", "save the packet to disk"),
         help_line("y", "copy the open-question export without quitting"),
@@ -383,6 +393,104 @@ fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
     app.composer_cursor_screen_pos = Some((cursor_x, cursor_y));
 }
 
+fn render_file_picker(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(area, 74, 72);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" Add Tracked File ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(THEME.panel).fg(THEME.text))
+        .border_style(Style::default().fg(THEME.accent));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let picker = app
+        .file_picker
+        .as_ref()
+        .expect("file picker must exist in file picker mode");
+    render_picker_contents(frame, inner, picker, "Search workspace files");
+    let (cursor_x, cursor_y) = text_cursor_position(&picker.query, inner);
+    app.composer_cursor_screen_pos = Some((cursor_x, cursor_y));
+}
+
+fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
+    let popup = centered_rect(area, 74, 72);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" Search Notes ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(THEME.panel).fg(THEME.text))
+        .border_style(Style::default().fg(THEME.border_focus));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let search = app
+        .search
+        .as_ref()
+        .expect("search state must exist in search mode");
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(inner);
+
+    render_text_area(
+        frame,
+        sections[0],
+        " Search ",
+        &search.query.text,
+        true,
+        THEME.border_focus,
+    );
+
+    let items = search
+        .matches
+        .iter()
+        .take(sections[1].height as usize)
+        .enumerate()
+        .map(|(index, candidate)| {
+            let selected = index == search.selected;
+            let style = if selected {
+                Style::default()
+                    .bg(THEME.cursor_line)
+                    .fg(THEME.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(THEME.text)
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▸ " } else { "  " },
+                    Style::default().fg(THEME.accent),
+                ),
+                Span::styled(
+                    format!("{}:{} ", candidate.path, candidate.line),
+                    Style::default()
+                        .fg(THEME.accent)
+                        .bg(style.bg.unwrap_or(THEME.panel)),
+                ),
+                Span::styled(candidate.label.clone(), style),
+                Span::raw(" "),
+                Span::styled(
+                    truncate_from_start(
+                        &candidate.preview,
+                        sections[1].width.saturating_sub(24) as usize,
+                    ),
+                    Style::default()
+                        .fg(THEME.muted)
+                        .bg(style.bg.unwrap_or(THEME.panel)),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(items)
+            .style(Style::default().bg(THEME.panel))
+            .wrap(Wrap { trim: false }),
+        sections[1],
+    );
+    let (cursor_x, cursor_y) = text_cursor_position(&search.query, sections[0]);
+    app.composer_cursor_screen_pos = Some((cursor_x, cursor_y));
+}
+
 fn render_text_area(
     frame: &mut Frame,
     area: Rect,
@@ -475,9 +583,11 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
         if !source_notes.is_empty() || !source_questions.is_empty() {
             annotation_lines.push(line_no);
         }
+        let highlighted = file.highlighted_lines.get(line_no.saturating_sub(1));
         rendered.push(render_source_line(
             line_no,
             &content,
+            highlighted,
             digits,
             line_no == app.cursor_line,
             !source_notes.is_empty(),
@@ -516,6 +626,7 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
 fn render_source_line(
     line_no: usize,
     content: &str,
+    highlighted: Option<&crate::syntax::StyledSegments>,
     digits: usize,
     selected: bool,
     has_note: bool,
@@ -532,22 +643,43 @@ fn render_source_line(
         prefix = "◆".to_string();
     }
 
-    let style = if selected {
-        Style::default().bg(THEME.cursor_line).fg(THEME.text)
+    let line_bg = if selected {
+        THEME.cursor_line
     } else {
-        Style::default().fg(THEME.text)
+        THEME.panel
     };
 
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(THEME.accent)),
-        Span::raw(" "),
+    let mut spans = vec![
+        Span::styled(prefix, Style::default().fg(THEME.accent).bg(line_bg)),
+        Span::styled(" ", Style::default().bg(line_bg)),
         Span::styled(
             format!("{line_no:>digits$}", digits = digits),
-            Style::default().fg(THEME.muted),
+            Style::default().fg(THEME.muted).bg(line_bg),
         ),
-        Span::styled(" │ ", Style::default().fg(THEME.border)),
-        Span::styled(content.to_string(), style),
-    ])
+        Span::styled(" │ ", Style::default().fg(THEME.border).bg(line_bg)),
+    ];
+
+    if let Some(segments) = highlighted {
+        if segments.is_empty() {
+            spans.push(Span::styled(
+                content.to_string(),
+                Style::default().fg(THEME.text).bg(line_bg),
+            ));
+        } else {
+            spans.extend(segments.iter().map(|(style, text)| {
+                let mut patched = *style;
+                patched = patched.bg(line_bg);
+                Span::styled(text.clone(), patched)
+            }));
+        }
+    } else {
+        spans.push(Span::styled(
+            content.to_string(),
+            Style::default().fg(THEME.text).bg(line_bg),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn render_note_card(note: &Note, width: usize) -> Vec<Line<'static>> {
@@ -762,6 +894,80 @@ fn help_line(key: &str, description: &str) -> Line<'static> {
         ),
         Span::styled(description.to_string(), Style::default().fg(THEME.text)),
     ])
+}
+
+fn render_picker_contents(frame: &mut Frame, area: Rect, picker: &FilePickerState, title: &str) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+    render_text_area(
+        frame,
+        sections[0],
+        " Search ",
+        &picker.query.text,
+        true,
+        THEME.accent,
+    );
+
+    let items = picker
+        .matches
+        .iter()
+        .take(sections[1].height as usize)
+        .enumerate()
+        .map(|(index, path)| {
+            let selected = index == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .bg(THEME.cursor_line)
+                    .fg(THEME.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(THEME.text).bg(THEME.panel)
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▸ " } else { "  " },
+                    Style::default()
+                        .fg(THEME.accent)
+                        .bg(style.bg.unwrap_or(THEME.panel)),
+                ),
+                Span::styled(path.clone(), style),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let heading = Paragraph::new(Line::from(vec![Span::styled(
+        title.to_string(),
+        Style::default().fg(THEME.muted).bg(THEME.panel),
+    )]))
+    .style(Style::default().bg(THEME.panel));
+    frame.render_widget(
+        heading,
+        Rect {
+            x: sections[1].x,
+            y: sections[1].y.saturating_sub(1),
+            width: sections[1].width,
+            height: 1,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(items)
+            .style(Style::default().bg(THEME.panel))
+            .wrap(Wrap { trim: false }),
+        sections[1],
+    );
+}
+
+fn text_cursor_position(buffer: &super::app::TextBuffer, area: Rect) -> (u16, u16) {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let (line_index, column_index) = line_col_at(&buffer.text, buffer.cursor);
+    let x = inner.x.saturating_add(column_index as u16);
+    let y = inner.y.saturating_add(line_index as u16);
+    (
+        x.min(inner.x + inner.width.saturating_sub(1)),
+        y.min(inner.y + inner.height.saturating_sub(1)),
+    )
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {

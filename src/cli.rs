@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, ValueHint};
 
 use crate::clipboard;
@@ -58,13 +58,6 @@ pub fn run() -> Result<()> {
     let merged = storage::merge_files(&mut packet, &cwd, &cli.files);
     if merged {
         packet.touch();
-    }
-
-    if packet.files.is_empty() {
-        bail!(
-            "session {} does not track any files yet; pass source files on the command line",
-            session_id
-        );
     }
 
     storage::write_packet(&session_path, &packet)?;
