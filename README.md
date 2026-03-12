@@ -48,7 +48,7 @@ That opens the default session for the current directory. If it has no tracked f
 | `--print-session-path` | Print the saved session path and exit |
 | `--export` | Export open questions without opening the TUI |
 | `--stdout` | Print exports to stdout instead of copying them to the clipboard |
-| `--theme <THEME>` | Select a built-in theme: `dark`, `light`, `one-dark`, `gruvbox-dark`, `gruvbox-light`, `catppuccin-mocha`, `catppuccin-latte`, `ayu-light` |
+| `--theme <THEME>` | Select a built-in theme. Default: `gruvbox-dark`. Choices: `dark`, `light`, `one-dark`, `gruvbox-dark`, `gruvbox-light`, `catppuccin-mocha`, `catppuccin-latte`, `ayu-light` |
 | `<FILE>...` | Merge one or more source files into the current session before opening the TUI |
 
 Examples:

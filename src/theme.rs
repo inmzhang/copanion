@@ -7,10 +7,10 @@ use two_face::theme::EmbeddedThemeName;
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum ThemeName {
-    #[default]
     Dark,
     Light,
     OneDark,
+    #[default]
     GruvboxDark,
     GruvboxLight,
     CatppuccinMocha,

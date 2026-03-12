@@ -212,10 +212,7 @@ fn render_source_view(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let focus = match app.focus {
-        FocusPane::Files => "files",
-        FocusPane::Source => "source",
-    };
+    let focus = status_mode_label(app);
     let dirty = if app.dirty { "unsaved" } else { "saved" };
     let current_notes = app.notes_for_current_line().len();
     let hints = match app.input_mode {
@@ -1112,12 +1109,33 @@ fn draft_mode_label(draft: &PromptDraft) -> String {
     }
 }
 
+fn status_mode_label(app: &App) -> String {
+    match app.input_mode {
+        InputMode::Normal => match app.focus {
+            FocusPane::Files => "files".to_string(),
+            FocusPane::Source => "source".to_string(),
+        },
+        InputMode::Visual => "visual".to_string(),
+        InputMode::Draft | InputMode::DraftConfirm => app
+            .draft
+            .as_ref()
+            .map(|draft| match draft.kind {
+                DraftKind::Question => "question".to_string(),
+                DraftKind::Note => "note".to_string(),
+            })
+            .unwrap_or_else(|| "draft".to_string()),
+        InputMode::FilePicker => "files".to_string(),
+        InputMode::Search => "search".to_string(),
+        InputMode::Help => "help".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, TrackedFile};
 
-    use super::{build_source_lines, wrap_text};
-    use crate::tui::app::App;
+    use super::{build_source_lines, status_mode_label, wrap_text};
+    use crate::tui::app::{App, FocusPane, InputMode};
 
     #[test]
     fn wrapped_text_preserves_blank_paragraphs() {
@@ -1189,5 +1207,43 @@ mod tests {
         let app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
         let (_, metrics) = build_source_lines(&app, 80);
         assert_eq!(metrics.annotation_lines, vec![3]);
+    }
+
+    #[test]
+    fn status_label_tracks_question_and_note_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let packet = Packet::new(
+            "demo",
+            "Demo",
+            root.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
+
+        app.begin_question();
+        assert_eq!(status_mode_label(&app), "question");
+
+        app.discard_draft();
+        app.begin_note();
+        assert_eq!(status_mode_label(&app), "note");
+    }
+
+    #[test]
+    fn status_label_uses_focus_in_normal_mode() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let packet = Packet::new(
+            "demo",
+            "Demo",
+            root.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
+        app.input_mode = InputMode::Normal;
+        app.focus = FocusPane::Files;
+        assert_eq!(status_mode_label(&app), "files");
+        app.focus = FocusPane::Source;
+        assert_eq!(status_mode_label(&app), "source");
     }
 }

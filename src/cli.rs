@@ -198,4 +198,9 @@ mod tests {
             ThemeName::CatppuccinMocha
         );
     }
+
+    #[test]
+    fn default_theme_is_gruvbox_dark_when_nothing_overrides_it() {
+        assert_eq!(resolve_theme(None, None), ThemeName::GruvboxDark);
+    }
 }
