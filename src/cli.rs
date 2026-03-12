@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueHint};
 
 use crate::clipboard;
+use crate::config;
 use crate::export;
 use crate::model::Packet;
 use crate::storage::{self, SessionPaths};
@@ -41,13 +42,18 @@ pub struct Cli {
     #[arg(long)]
     stdout: bool,
     /// Built-in UI theme.
-    #[arg(long, value_enum, default_value_t = ThemeName::Dark)]
-    theme: ThemeName,
+    #[arg(long, value_enum)]
+    theme: Option<ThemeName>,
 }
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    theme::set_active(cli.theme);
+    let config_outcome = config::load_config()?;
+    for warning in &config_outcome.warnings {
+        eprintln!("{warning}");
+    }
+    let resolved_theme = resolve_theme(cli.theme, config_outcome.config.as_ref());
+    theme::set_active(resolved_theme);
     let cwd = std::env::current_dir().context("failed to read the current directory")?;
     let paths = SessionPaths::discover()?;
     paths.ensure_initialized()?;
@@ -84,6 +90,18 @@ pub fn run() -> Result<()> {
     }
 
     tui::run(&session_path, cli.stdout)
+}
+
+fn resolve_theme(cli_theme: Option<ThemeName>, config: Option<&config::AppConfig>) -> ThemeName {
+    if let Some(theme) = cli_theme {
+        return theme;
+    }
+    if let Some(theme_str) = config.and_then(|config| config.theme.as_deref())
+        && let Some(theme) = ThemeName::parse_config(theme_str)
+    {
+        return theme;
+    }
+    ThemeName::default()
 }
 
 fn build_session(
@@ -127,9 +145,11 @@ fn build_session(
 mod tests {
     use std::path::Path;
 
+    use crate::config::AppConfig;
     use crate::model::{Packet, TrackedFile};
+    use crate::theme::ThemeName;
 
-    use super::build_session;
+    use super::{build_session, resolve_theme};
 
     #[test]
     fn fresh_session_preserves_existing_files() {
@@ -155,5 +175,27 @@ mod tests {
             Some(packet),
         );
         assert_eq!(rebuilt.title, "New");
+    }
+
+    #[test]
+    fn cli_theme_overrides_config_theme() {
+        let config = AppConfig {
+            theme: Some("light".to_string()),
+        };
+        assert_eq!(
+            resolve_theme(Some(ThemeName::GruvboxDark), Some(&config)),
+            ThemeName::GruvboxDark
+        );
+    }
+
+    #[test]
+    fn config_theme_applies_when_cli_theme_missing() {
+        let config = AppConfig {
+            theme: Some("catppuccin-mocha".to_string()),
+        };
+        assert_eq!(
+            resolve_theme(None, Some(&config)),
+            ThemeName::CatppuccinMocha
+        );
     }
 }

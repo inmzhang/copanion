@@ -37,6 +37,10 @@ pub struct Theme {
 }
 
 impl ThemeName {
+    pub fn parse_config(value: &str) -> Option<Self> {
+        <Self as clap::ValueEnum>::from_str(value, true).ok()
+    }
+
     pub fn theme(self) -> Theme {
         match self {
             ThemeName::Dark => Theme {

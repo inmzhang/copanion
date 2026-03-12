@@ -48,7 +48,7 @@ That opens the default session for the current directory. If it has no tracked f
 | `--print-session-path` | Print the saved session path and exit |
 | `--export` | Export open questions without opening the TUI |
 | `--stdout` | Print exports to stdout instead of copying them to the clipboard |
-| `--theme <THEME>` | Select a built-in theme: `dark`, `light`, `onedark`, `gruvbox-dark`, `gruvbox-light`, `catppuccin-mocha`, `catppuccin-latte`, `ayu-light` |
+| `--theme <THEME>` | Select a built-in theme: `dark`, `light`, `one-dark`, `gruvbox-dark`, `gruvbox-light`, `catppuccin-mocha`, `catppuccin-latte`, `ayu-light` |
 | `<FILE>...` | Merge one or more source files into the current session before opening the TUI |
 
 Examples:
@@ -59,6 +59,25 @@ copanion --session scheduler-tour --print-session-path
 copanion --session scheduler-tour --export --stdout
 copanion --session scheduler-tour --theme gruvbox-dark
 ```
+
+## Configuration
+
+Set a default theme in:
+
+- Linux/macOS: `$XDG_CONFIG_HOME/copanion/config.toml` (default: `~/.config/copanion/config.toml`)
+- Windows: `%APPDATA%\copanion\config.toml`
+
+Example:
+
+```toml
+theme = "gruvbox-dark"
+```
+
+Theme precedence:
+
+1. `--theme <THEME>`
+2. `theme` in the config file above
+3. built-in default (`dark`)
 
 ## TUI Keys
 
