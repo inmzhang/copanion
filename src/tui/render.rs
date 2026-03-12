@@ -8,48 +8,23 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{Note, NoteKind, NoteSource, Question};
+use crate::theme::{self, Theme};
 
-use super::app::{App, ComposerField, FilePickerState, FocusPane, InputMode, ViewMetrics};
-
-#[derive(Clone, Copy)]
-struct Theme {
-    bg: Color,
-    panel: Color,
-    border: Color,
-    border_focus: Color,
-    text: Color,
-    muted: Color,
-    accent: Color,
-    note_bg: Color,
-    note_border: Color,
-    question_bg: Color,
-    question_border: Color,
-    cursor_line: Color,
-    danger: Color,
-    success: Color,
-}
-
-const THEME: Theme = Theme {
-    bg: Color::Rgb(14, 20, 28),
-    panel: Color::Rgb(18, 28, 38),
-    border: Color::Rgb(62, 86, 108),
-    border_focus: Color::Rgb(129, 194, 255),
-    text: Color::Rgb(228, 237, 245),
-    muted: Color::Rgb(138, 159, 178),
-    accent: Color::Rgb(102, 214, 201),
-    note_bg: Color::Rgb(22, 45, 58),
-    note_border: Color::Rgb(102, 214, 201),
-    question_bg: Color::Rgb(59, 42, 21),
-    question_border: Color::Rgb(236, 194, 83),
-    cursor_line: Color::Rgb(39, 55, 71),
-    danger: Color::Rgb(234, 106, 108),
-    success: Color::Rgb(144, 203, 104),
+use super::app::{
+    App, DraftKind, DraftTarget, FilePickerState, FocusPane, InputMode, PromptDraft, ViewMetrics,
 };
+
+fn theme() -> Theme {
+    theme::active()
+}
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.composer_cursor_screen_pos = None;
-    frame.render_widget(Block::default().style(Style::default().bg(THEME.bg)), area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme().bg)),
+        area,
+    );
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -66,7 +41,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     match app.input_mode {
         InputMode::Help => render_help(frame, sections[1]),
-        InputMode::QuestionComposer => render_composer(frame, app, sections[1]),
+        InputMode::Draft => render_draft(frame, app, sections[1]),
+        InputMode::DraftConfirm => {
+            render_draft(frame, app, sections[1]);
+            render_draft_confirm(frame, sections[1]);
+        }
         InputMode::FilePicker => render_file_picker(frame, app, sections[1]),
         InputMode::Search => render_search(frame, app, sections[1]),
         InputMode::Normal => {}
@@ -80,11 +59,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let file = app.current_file();
     let header = Line::from(vec![
-        Span::styled(" COPANION ", Style::default().fg(THEME.bg).bg(THEME.accent)),
+        Span::styled(
+            " COPANION ",
+            Style::default().fg(theme().bg).bg(theme().accent),
+        ),
         Span::raw("  "),
         Span::styled(
             &app.packet.title,
-            Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme().text)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
@@ -94,14 +78,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
                 app.packet.notes.len(),
                 app.packet.open_questions().count()
             ),
-            Style::default().fg(THEME.muted),
+            Style::default().fg(theme().muted),
         ),
         Span::raw("  "),
-        Span::styled(file.path.as_str(), Style::default().fg(THEME.accent)),
+        Span::styled(file.path.as_str(), Style::default().fg(theme().accent)),
     ]);
 
     frame.render_widget(
-        Paragraph::new(header).style(Style::default().bg(THEME.bg)),
+        Paragraph::new(header).style(Style::default().bg(theme().bg)),
         area,
     );
 }
@@ -121,7 +105,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(" Files ")
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
+        .style(Style::default().bg(theme().panel).fg(theme().text))
         .border_style(border_style(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -134,41 +118,45 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
             let selected = index == app.current_file;
             let note_count = app.file_note_count(&file.path);
             let question_count = app.file_open_question_count(&file.path);
+            let bg = if selected {
+                theme().cursor_line
+            } else {
+                theme().panel
+            };
             let style = if selected {
                 Style::default()
-                    .fg(THEME.text)
-                    .bg(THEME.cursor_line)
+                    .fg(theme().text)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(THEME.text)
+                Style::default().fg(theme().text).bg(bg)
             };
-            let mut spans = vec![
+            Line::from(vec![
                 Span::styled(
                     if selected { "▸ " } else { "  " },
-                    Style::default().fg(THEME.accent),
+                    Style::default().fg(theme().accent).bg(bg),
                 ),
                 Span::styled(
                     truncate_from_start(&file.path, inner.width.saturating_sub(12) as usize),
                     style,
                 ),
-            ];
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("{note_count}n"),
-                Style::default().fg(THEME.note_border),
-            ));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("{question_count}q"),
-                Style::default().fg(THEME.question_border),
-            ));
-            Line::from(spans)
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    format!("{note_count}n"),
+                    Style::default().fg(theme().note_border).bg(bg),
+                ),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    format!("{question_count}q"),
+                    Style::default().fg(theme().question_border).bg(bg),
+                ),
+            ])
         })
         .collect();
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().bg(THEME.panel))
+            .style(Style::default().bg(theme().panel))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -179,7 +167,7 @@ fn render_source_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(format!(" {} ", app.current_path()))
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
+        .style(Style::default().bg(theme().panel).fg(theme().text))
         .border_style(border_style(focused));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -202,7 +190,7 @@ fn render_source_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(visible)
-            .style(Style::default().bg(THEME.panel))
+            .style(Style::default().bg(theme().panel))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -217,11 +205,10 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let current_notes = app.notes_for_current_line().len();
     let hints = match app.input_mode {
         InputMode::Normal => {
-            "Tab focus  j/k move  dd delete  f add file  / search notes  a ask  s save  x save+quit"
+            "Tab focus  j/k move  [] jump  dd delete  a question  n note  i edit  f add file  / search"
         }
-        InputMode::QuestionComposer => {
-            "Type your question  Tab switch field  Ctrl-S save question  Esc cancel"
-        }
+        InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
+        InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
         InputMode::Search => "Type to fuzzy-search notes  Enter jump  j/k move  Esc cancel",
         InputMode::Help => "q or Esc closes help",
@@ -230,7 +217,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
             format!(" {focus} "),
-            Style::default().fg(THEME.bg).bg(THEME.accent),
+            Style::default().fg(theme().bg).bg(theme().accent),
         ),
         Span::raw(" "),
         Span::styled(
@@ -238,159 +225,183 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
                 "line {}  {}  {} attached notes",
                 app.cursor_line, dirty, current_notes
             ),
-            Style::default().fg(THEME.muted),
+            Style::default().fg(theme().muted),
         ),
         Span::raw("  "),
-        Span::styled(message, Style::default().fg(THEME.text)),
+        Span::styled(message, Style::default().fg(theme().text)),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(THEME.bg)),
+        Paragraph::new(line).style(Style::default().bg(theme().bg)),
         area,
     );
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(area, 70, 60);
+    let popup = centered_rect(area, 74, 68);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .title(" Copanion Help ")
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
-        .border_style(Style::default().fg(THEME.border_focus));
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(theme().border_focus));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
     let help = vec![
         Line::from(vec![Span::styled(
             "The viewer keeps code primary and injects note cards directly below their anchors.",
-            Style::default().fg(THEME.text),
+            Style::default().fg(theme().text),
         )]),
         Line::default(),
         help_line("Tab", "toggle focus between file list and source"),
         help_line("j / k", "move through the selected pane"),
         help_line("h / l", "switch files from the source pane"),
         help_line("[ / ]", "jump to the previous or next annotated line"),
-        help_line("a", "open the question composer at the current source line"),
+        help_line("a", "open a QUESTION draft at the current source line"),
+        help_line("n", "open a NOTE draft at the current source line"),
+        help_line(
+            "i",
+            "edit the question under the cursor, or fall back to the note",
+        ),
+        help_line(
+            "I",
+            "edit the note under the cursor, or fall back to the question",
+        ),
         help_line("f", "open the fuzzy file picker and add a tracked file"),
         help_line("/", "fuzzy-search notes and questions, then jump"),
         help_line(
             "dd",
             "delete the selected file or the annotation under the cursor",
         ),
-        help_line("r", "reload tracked source files from disk"),
-        help_line("s", "save the packet to disk"),
+        help_line("Ctrl-O", "open the current draft in $VISUAL or $EDITOR"),
+        help_line("s", "save the session to disk"),
         help_line("y", "copy the open-question export without quitting"),
         help_line("x", "save, export open questions, and quit"),
         help_line("q", "quit; press twice if there are unsaved changes"),
         help_line("?", "toggle this help"),
-        Line::default(),
-        help_line(
-            "Question composer",
-            "Ctrl-S saves the question, Tab switches between prompt and why",
-        ),
     ];
 
     frame.render_widget(
         Paragraph::new(help)
-            .style(Style::default().bg(THEME.panel))
+            .style(Style::default().bg(theme().panel))
             .wrap(Wrap { trim: false }),
         inner,
     );
 }
 
-fn render_composer(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_draft(frame: &mut Frame, app: &mut App, area: Rect) {
     let popup = centered_rect(area, 76, 72);
     frame.render_widget(Clear, popup);
+    let draft = app.draft.as_ref().expect("draft must exist in draft mode");
+    let (title, border_color) = match draft.kind {
+        DraftKind::Question => (" Question Draft ", theme().question_border),
+        DraftKind::Note => (" Note Draft ", theme().note_border),
+    };
     let block = Block::default()
-        .title(" Ask Follow-up Question ")
+        .title(title)
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
-        .border_style(Style::default().fg(THEME.question_border));
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(border_color));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let composer = app
-        .composer
-        .as_ref()
-        .expect("composer must exist in composer mode");
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
             Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Min(3),
             Constraint::Length(2),
         ])
         .split(inner);
 
     let summary = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("File: ", Style::default().fg(THEME.muted)),
-            Span::styled(composer.path.as_str(), Style::default().fg(THEME.accent)),
+            Span::styled("Mode: ", Style::default().fg(theme().muted)),
+            Span::styled(draft_mode_label(draft), Style::default().fg(theme().accent)),
             Span::raw("  "),
-            Span::styled("Anchor: ", Style::default().fg(THEME.muted)),
-            Span::styled(composer.anchor.to_string(), Style::default().fg(THEME.text)),
+            Span::styled("File: ", Style::default().fg(theme().muted)),
+            Span::styled(draft.path.as_str(), Style::default().fg(theme().text)),
         ]),
         Line::from(vec![
-            Span::styled("Related notes: ", Style::default().fg(THEME.muted)),
+            Span::styled("Anchor: ", Style::default().fg(theme().muted)),
+            Span::styled(draft.anchor.to_string(), Style::default().fg(theme().text)),
+            Span::raw("  "),
+            Span::styled("Linked notes: ", Style::default().fg(theme().muted)),
             Span::styled(
-                if composer.related_note_ids.is_empty() {
+                if draft.related_note_ids.is_empty() {
                     "none".to_string()
                 } else {
-                    composer.related_note_ids.join(", ")
+                    draft.related_note_ids.join(", ")
                 },
-                Style::default().fg(THEME.text),
+                Style::default().fg(theme().text),
             ),
         ]),
     ])
-    .style(Style::default().bg(THEME.panel));
+    .style(Style::default().bg(theme().panel));
     frame.render_widget(summary, sections[0]);
 
-    let prompt_focused = composer.field == ComposerField::Prompt;
     render_text_area(
         frame,
         sections[1],
-        " Prompt ",
-        &composer.prompt.text,
-        prompt_focused,
-        THEME.question_border,
-    );
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "Why this is unclear",
-            Style::default().fg(THEME.muted),
-        )]))
-        .style(Style::default().bg(THEME.panel)),
-        sections[2],
-    );
-
-    let why_focused = composer.field == ComposerField::Why;
-    render_text_area(
-        frame,
-        sections[3],
-        " Why ",
-        &composer.why.text,
-        why_focused,
-        THEME.border_focus,
+        match draft.kind {
+            DraftKind::Question => " Question ",
+            DraftKind::Note => " Note ",
+        },
+        &draft.buffer.text,
+        true,
+        border_color,
     );
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Ctrl-S", Style::default().fg(THEME.success)),
-            Span::raw(" save question  "),
-            Span::styled("Esc", Style::default().fg(THEME.danger)),
-            Span::raw(" cancel  "),
-            Span::styled("Tab", Style::default().fg(THEME.accent)),
-            Span::raw(" switch field"),
+            Span::styled("Ctrl-S", Style::default().fg(theme().success)),
+            Span::raw(" save  "),
+            Span::styled("Ctrl-O", Style::default().fg(theme().accent)),
+            Span::raw(" external editor  "),
+            Span::styled("Esc", Style::default().fg(theme().danger)),
+            Span::raw(" close"),
         ]))
-        .style(Style::default().bg(THEME.panel)),
-        sections[4],
+        .style(Style::default().bg(theme().panel)),
+        sections[2],
     );
 
-    let (cursor_x, cursor_y) = cursor_position_for_composer(composer, sections[1], sections[3]);
+    let (cursor_x, cursor_y) = text_cursor_position(&draft.buffer, sections[1]);
     app.composer_cursor_screen_pos = Some((cursor_x, cursor_y));
+}
+
+fn render_draft_confirm(frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(area, 44, 18);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" Close Draft ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(theme().danger));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let lines = vec![
+        Line::from(Span::styled(
+            "Save the current draft before closing?",
+            Style::default()
+                .fg(theme().text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("y", Style::default().fg(theme().success)),
+            Span::raw(" save it  "),
+            Span::styled("n", Style::default().fg(theme().danger)),
+            Span::raw(" discard it  "),
+            Span::styled("Esc", Style::default().fg(theme().accent)),
+            Span::raw(" keep editing"),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme().panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn render_file_picker(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -399,8 +410,8 @@ fn render_file_picker(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(" Add Tracked File ")
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
-        .border_style(Style::default().fg(THEME.accent));
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let picker = app
@@ -418,8 +429,8 @@ fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(" Search Notes ")
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
-        .border_style(Style::default().fg(THEME.border_focus));
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(theme().border_focus));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -438,7 +449,7 @@ fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
         " Search ",
         &search.query.text,
         true,
-        THEME.border_focus,
+        theme().border_focus,
     );
 
     let items = search
@@ -448,42 +459,43 @@ fn render_search(frame: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .map(|(index, candidate)| {
             let selected = index == search.selected;
+            let bg = if selected {
+                theme().cursor_line
+            } else {
+                theme().panel
+            };
             let style = if selected {
                 Style::default()
-                    .bg(THEME.cursor_line)
-                    .fg(THEME.text)
+                    .bg(bg)
+                    .fg(theme().text)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(THEME.text)
+                Style::default().bg(bg).fg(theme().text)
             };
             Line::from(vec![
                 Span::styled(
                     if selected { "▸ " } else { "  " },
-                    Style::default().fg(THEME.accent),
+                    Style::default().fg(theme().accent).bg(bg),
                 ),
                 Span::styled(
                     format!("{}:{} ", candidate.path, candidate.line),
-                    Style::default()
-                        .fg(THEME.accent)
-                        .bg(style.bg.unwrap_or(THEME.panel)),
+                    Style::default().fg(theme().accent).bg(bg),
                 ),
                 Span::styled(candidate.label.clone(), style),
-                Span::raw(" "),
+                Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
                     truncate_from_start(
                         &candidate.preview,
                         sections[1].width.saturating_sub(24) as usize,
                     ),
-                    Style::default()
-                        .fg(THEME.muted)
-                        .bg(style.bg.unwrap_or(THEME.panel)),
+                    Style::default().fg(theme().muted).bg(bg),
                 ),
             ])
         })
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(items)
-            .style(Style::default().bg(THEME.panel))
+            .style(Style::default().bg(theme().panel))
             .wrap(Wrap { trim: false }),
         sections[1],
     );
@@ -502,18 +514,18 @@ fn render_text_area(
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .style(Style::default().bg(THEME.panel).fg(THEME.text))
+        .style(Style::default().bg(theme().panel).fg(theme().text))
         .border_style(if focused {
             Style::default().fg(accent)
         } else {
-            Style::default().fg(THEME.border)
+            Style::default().fg(theme().border)
         });
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let lines = if text.is_empty() {
         vec![Line::from(Span::styled(
             "Type here...",
-            Style::default().fg(THEME.muted),
+            Style::default().fg(theme().muted),
         ))]
     } else {
         text.lines()
@@ -522,7 +534,7 @@ fn render_text_area(
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().bg(THEME.panel).fg(THEME.text))
+            .style(Style::default().bg(theme().panel).fg(theme().text))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -535,12 +547,12 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             Line::from(Span::styled(
                 format!("unable to read {}", file.path),
                 Style::default()
-                    .fg(THEME.danger)
+                    .fg(theme().danger)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 error.clone(),
-                Style::default().fg(THEME.muted),
+                Style::default().fg(theme().muted),
             )),
         ];
         return (
@@ -608,7 +620,7 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             file.path,
             annotation_lines.len()
         ),
-        Style::default().fg(THEME.muted),
+        Style::default().fg(theme().muted),
     )]));
 
     let total_rows = rendered.len();
@@ -644,26 +656,26 @@ fn render_source_line(
     }
 
     let line_bg = if selected {
-        THEME.cursor_line
+        theme().cursor_line
     } else {
-        THEME.panel
+        theme().panel
     };
 
     let mut spans = vec![
-        Span::styled(prefix, Style::default().fg(THEME.accent).bg(line_bg)),
+        Span::styled(prefix, Style::default().fg(theme().accent).bg(line_bg)),
         Span::styled(" ", Style::default().bg(line_bg)),
         Span::styled(
             format!("{line_no:>digits$}", digits = digits),
-            Style::default().fg(THEME.muted).bg(line_bg),
+            Style::default().fg(theme().muted).bg(line_bg),
         ),
-        Span::styled(" │ ", Style::default().fg(THEME.border).bg(line_bg)),
+        Span::styled(" │ ", Style::default().fg(theme().border).bg(line_bg)),
     ];
 
     if let Some(segments) = highlighted {
         if segments.is_empty() {
             spans.push(Span::styled(
                 content.to_string(),
-                Style::default().fg(THEME.text).bg(line_bg),
+                Style::default().fg(theme().text).bg(line_bg),
             ));
         } else {
             spans.extend(segments.iter().map(|(style, text)| {
@@ -675,7 +687,7 @@ fn render_source_line(
     } else {
         spans.push(Span::styled(
             content.to_string(),
-            Style::default().fg(THEME.text).bg(line_bg),
+            Style::default().fg(theme().text).bg(line_bg),
         ));
     }
 
@@ -695,27 +707,27 @@ fn render_note_card(note: &Note, width: usize) -> Vec<Line<'static>> {
         &note.body,
         note.tags.as_slice(),
         width,
-        THEME.note_border,
-        THEME.note_bg,
+        theme().note_border,
+        theme().note_bg,
     );
     lines.insert(
         0,
         Line::from(vec![
-            Span::styled("  ", Style::default().bg(THEME.panel)),
+            Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled(
                 "╭─ ",
-                Style::default().fg(THEME.note_border).bg(THEME.note_bg),
+                Style::default().fg(theme().note_border).bg(theme().note_bg),
             ),
             Span::styled(
                 note.title.clone(),
                 Style::default()
-                    .fg(THEME.text)
-                    .bg(THEME.note_bg)
+                    .fg(theme().text)
+                    .bg(theme().note_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  {title}"),
-                Style::default().fg(THEME.muted).bg(THEME.note_bg),
+                Style::default().fg(theme().muted).bg(theme().note_bg),
             ),
         ]),
     );
@@ -727,39 +739,35 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
         .anchor
         .map(|anchor| format!("open question · line {anchor}"))
         .unwrap_or_else(|| "open question".to_string());
-    let body = match &question.why {
-        Some(why) => format!("{}\n\nWhy unclear: {why}", question.prompt),
-        None => question.prompt.clone(),
-    };
     let mut lines = render_card(
         "Question",
         &title,
-        &body,
+        &question.prompt,
         question.related_note_ids.as_slice(),
         width,
-        THEME.question_border,
-        THEME.question_bg,
+        theme().question_border,
+        theme().question_bg,
     );
     lines.insert(
         0,
         Line::from(vec![
-            Span::styled("  ", Style::default().bg(THEME.panel)),
+            Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled(
                 "╭─ ",
                 Style::default()
-                    .fg(THEME.question_border)
-                    .bg(THEME.question_bg),
+                    .fg(theme().question_border)
+                    .bg(theme().question_bg),
             ),
             Span::styled(
                 "Open Question",
                 Style::default()
-                    .fg(THEME.text)
-                    .bg(THEME.question_bg)
+                    .fg(theme().text)
+                    .bg(theme().question_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  {title}"),
-                Style::default().fg(THEME.muted).bg(THEME.question_bg),
+                Style::default().fg(theme().muted).bg(theme().question_bg),
             ),
         ]),
     );
@@ -780,27 +788,27 @@ fn render_card(
     let wrapped = wrap_text(body, inner_width);
     for line in wrapped {
         lines.push(Line::from(vec![
-            Span::styled("  ", Style::default().bg(THEME.panel)),
+            Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled("│ ", Style::default().fg(border_color).bg(background)),
-            Span::styled(line, Style::default().fg(THEME.text).bg(background)),
+            Span::styled(line, Style::default().fg(theme().text).bg(background)),
         ]));
     }
     if !tags.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  ", Style::default().bg(THEME.panel)),
+            Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled("│ ", Style::default().fg(border_color).bg(background)),
             Span::styled(
                 format!("Linked: {}", tags.join(", ")),
-                Style::default().fg(THEME.muted).bg(background),
+                Style::default().fg(theme().muted).bg(background),
             ),
         ]));
     }
     lines.push(Line::from(vec![
-        Span::styled("  ", Style::default().bg(THEME.panel)),
+        Span::styled("  ", Style::default().bg(theme().panel)),
         Span::styled("╰─ ", Style::default().fg(border_color).bg(background)),
         Span::styled(
             format!("{label} · {subtitle}"),
-            Style::default().fg(THEME.muted).bg(background),
+            Style::default().fg(theme().muted).bg(background),
         ),
     ]));
     lines
@@ -889,10 +897,10 @@ fn help_line(key: &str, description: &str) -> Line<'static> {
         Span::styled(
             format!("{key:<16}"),
             Style::default()
-                .fg(THEME.accent)
+                .fg(theme().accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(description.to_string(), Style::default().fg(THEME.text)),
+        Span::styled(description.to_string(), Style::default().fg(theme().text)),
     ])
 }
 
@@ -907,7 +915,7 @@ fn render_picker_contents(frame: &mut Frame, area: Rect, picker: &FilePickerStat
         " Search ",
         &picker.query.text,
         true,
-        THEME.accent,
+        theme().accent,
     );
 
     let items = picker
@@ -917,33 +925,35 @@ fn render_picker_contents(frame: &mut Frame, area: Rect, picker: &FilePickerStat
         .enumerate()
         .map(|(index, path)| {
             let selected = index == picker.selected;
+            let bg = if selected {
+                theme().cursor_line
+            } else {
+                theme().panel
+            };
             let style = if selected {
                 Style::default()
-                    .bg(THEME.cursor_line)
-                    .fg(THEME.text)
+                    .bg(bg)
+                    .fg(theme().text)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(THEME.text).bg(THEME.panel)
+                Style::default().fg(theme().text).bg(bg)
             };
             Line::from(vec![
                 Span::styled(
                     if selected { "▸ " } else { "  " },
-                    Style::default()
-                        .fg(THEME.accent)
-                        .bg(style.bg.unwrap_or(THEME.panel)),
+                    Style::default().fg(theme().accent).bg(bg),
                 ),
                 Span::styled(path.clone(), style),
             ])
         })
         .collect::<Vec<_>>();
 
-    let heading = Paragraph::new(Line::from(vec![Span::styled(
-        title.to_string(),
-        Style::default().fg(THEME.muted).bg(THEME.panel),
-    )]))
-    .style(Style::default().bg(THEME.panel));
     frame.render_widget(
-        heading,
+        Paragraph::new(Line::from(vec![Span::styled(
+            title.to_string(),
+            Style::default().fg(theme().muted).bg(theme().panel),
+        )]))
+        .style(Style::default().bg(theme().panel)),
         Rect {
             x: sections[1].x,
             y: sections[1].y.saturating_sub(1),
@@ -953,21 +963,10 @@ fn render_picker_contents(frame: &mut Frame, area: Rect, picker: &FilePickerStat
     );
     frame.render_widget(
         Paragraph::new(items)
-            .style(Style::default().bg(THEME.panel))
+            .style(Style::default().bg(theme().panel))
             .wrap(Wrap { trim: false }),
         sections[1],
     );
-}
-
-fn text_cursor_position(buffer: &super::app::TextBuffer, area: Rect) -> (u16, u16) {
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    let (line_index, column_index) = line_col_at(&buffer.text, buffer.cursor);
-    let x = inner.x.saturating_add(column_index as u16);
-    let y = inner.y.saturating_add(line_index as u16);
-    (
-        x.min(inner.x + inner.width.saturating_sub(1)),
-        y.min(inner.y + inner.height.saturating_sub(1)),
-    )
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
@@ -990,15 +989,7 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
     horizontal[1]
 }
 
-fn cursor_position_for_composer(
-    composer: &super::app::QuestionComposer,
-    prompt_area: Rect,
-    why_area: Rect,
-) -> (u16, u16) {
-    let (buffer, area) = match composer.field {
-        ComposerField::Prompt => (&composer.prompt, prompt_area),
-        ComposerField::Why => (&composer.why, why_area),
-    };
+fn text_cursor_position(buffer: &super::app::TextBuffer, area: Rect) -> (u16, u16) {
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let (line_index, column_index) = line_col_at(&buffer.text, buffer.cursor);
     let x = inner.x.saturating_add(column_index as u16);
@@ -1045,9 +1036,20 @@ fn truncate_from_start(path: &str, max_width: usize) -> String {
 
 fn border_style(focused: bool) -> Style {
     if focused {
-        Style::default().fg(THEME.border_focus)
+        Style::default().fg(theme().border_focus)
     } else {
-        Style::default().fg(THEME.border)
+        Style::default().fg(theme().border)
+    }
+}
+
+fn draft_mode_label(draft: &PromptDraft) -> String {
+    let target = match draft.target {
+        DraftTarget::New => "new",
+        DraftTarget::EditNote { .. } | DraftTarget::EditQuestion { .. } => "edit",
+    };
+    match draft.kind {
+        DraftKind::Question => format!("{target} question"),
+        DraftKind::Note => format!("{target} note"),
     }
 }
 
@@ -1055,7 +1057,8 @@ fn border_style(focused: bool) -> Style {
 mod tests {
     use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, TrackedFile};
 
-    use super::{App, build_source_lines, wrap_text};
+    use super::{build_source_lines, wrap_text};
+    use crate::tui::app::App;
 
     #[test]
     fn wrapped_text_preserves_blank_paragraphs() {

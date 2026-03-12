@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::Result;
+use chrono::Utc;
 use ignore::WalkBuilder;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::clipboard;
 use crate::export;
-use crate::model::{Anchor, Note, Packet, Question, QuestionStatus};
+use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, QuestionStatus};
 use crate::{storage, syntax};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -22,16 +23,24 @@ pub enum FocusPane {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum InputMode {
     Normal,
-    QuestionComposer,
+    Draft,
+    DraftConfirm,
     FilePicker,
     Search,
     Help,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ComposerField {
-    Prompt,
-    Why,
+pub enum DraftKind {
+    Question,
+    Note,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DraftTarget {
+    New,
+    EditNote { index: usize },
+    EditQuestion { index: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -41,13 +50,14 @@ pub struct TextBuffer {
 }
 
 #[derive(Debug, Clone)]
-pub struct QuestionComposer {
+pub struct PromptDraft {
+    pub kind: DraftKind,
+    pub target: DraftTarget,
     pub path: String,
     pub anchor: Anchor,
     pub related_note_ids: Vec<String>,
-    pub prompt: TextBuffer,
-    pub why: TextBuffer,
-    pub field: ComposerField,
+    pub buffer: TextBuffer,
+    pub original_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +111,7 @@ pub struct App {
     pub scroll: usize,
     pub focus: FocusPane,
     pub input_mode: InputMode,
-    pub composer: Option<QuestionComposer>,
+    pub draft: Option<PromptDraft>,
     pub file_picker: Option<FilePickerState>,
     pub search: Option<SearchState>,
     pub view_metrics: ViewMetrics,
@@ -129,7 +139,7 @@ impl App {
             scroll: 0,
             focus: FocusPane::Files,
             input_mode: InputMode::Normal,
-            composer: None,
+            draft: None,
             file_picker: None,
             search: None,
             view_metrics: ViewMetrics::default(),
@@ -155,15 +165,12 @@ impl App {
         self.message = None;
     }
 
-    pub fn active_buffer_mut(&mut self) -> &mut TextBuffer {
-        let composer = self
-            .composer
+    pub fn active_draft_buffer_mut(&mut self) -> &mut TextBuffer {
+        &mut self
+            .draft
             .as_mut()
-            .expect("composer buffer requested outside of composer mode");
-        match composer.field {
-            ComposerField::Prompt => &mut composer.prompt,
-            ComposerField::Why => &mut composer.why,
-        }
+            .expect("draft buffer requested outside of draft mode")
+            .buffer
     }
 
     pub fn active_file_picker_buffer_mut(&mut self) -> &mut TextBuffer {
@@ -180,15 +187,6 @@ impl App {
             .as_mut()
             .expect("search buffer requested outside of search mode")
             .query
-    }
-
-    pub fn toggle_composer_field(&mut self) {
-        if let Some(composer) = &mut self.composer {
-            composer.field = match composer.field {
-                ComposerField::Prompt => ComposerField::Why,
-                ComposerField::Why => ComposerField::Prompt,
-            };
-        }
     }
 
     pub fn toggle_focus(&mut self) {
@@ -279,33 +277,133 @@ impl App {
     }
 
     pub fn begin_question(&mut self) {
+        self.begin_new_draft(DraftKind::Question);
+    }
+
+    pub fn begin_note(&mut self) {
+        self.begin_new_draft(DraftKind::Note);
+    }
+
+    pub fn begin_edit_current_annotation(&mut self, prefer_note: bool) {
         if self.files.is_empty() {
-            self.message = Some("add a tracked file before asking a question".to_string());
+            self.message = Some("add a tracked file before editing annotations".to_string());
+            return;
+        }
+        let note_index = self.current_note_index();
+        let question_index = self.current_question_index();
+        let choice = if prefer_note {
+            note_index
+                .map(|index| DraftTarget::EditNote { index })
+                .or_else(|| question_index.map(|index| DraftTarget::EditQuestion { index }))
+        } else {
+            question_index
+                .map(|index| DraftTarget::EditQuestion { index })
+                .or_else(|| note_index.map(|index| DraftTarget::EditNote { index }))
+        };
+
+        let Some(target) = choice else {
+            self.message =
+                Some("there is no editable note or question on the current line".to_string());
+            return;
+        };
+
+        let draft = match target {
+            DraftTarget::EditNote { index } => {
+                let note = &self.packet.notes[index];
+                PromptDraft {
+                    kind: DraftKind::Note,
+                    target,
+                    path: note.path.clone(),
+                    anchor: note.anchor,
+                    related_note_ids: Vec::new(),
+                    buffer: TextBuffer::from_text(note.body.clone()),
+                    original_text: note.body.clone(),
+                }
+            }
+            DraftTarget::EditQuestion { index } => {
+                let question = &self.packet.questions[index];
+                PromptDraft {
+                    kind: DraftKind::Question,
+                    target,
+                    path: question.path.clone(),
+                    anchor: question
+                        .anchor
+                        .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+                    related_note_ids: question.related_note_ids.clone(),
+                    buffer: TextBuffer::from_text(question.prompt.clone()),
+                    original_text: question.prompt.clone(),
+                }
+            }
+            DraftTarget::New => unreachable!("edit path cannot pick a new target"),
+        };
+
+        self.draft = Some(draft);
+        self.input_mode = InputMode::Draft;
+        self.message =
+            Some("edit the annotation; Ctrl-S saves, Ctrl-O opens the external editor".to_string());
+    }
+
+    fn begin_new_draft(&mut self, kind: DraftKind) {
+        if self.files.is_empty() {
+            self.message = Some("add a tracked file before creating annotations".to_string());
             return;
         }
         self.discard_guard = false;
         let anchor = Anchor::new(self.cursor_line, None);
-        let related_note_ids = self
-            .notes_for_current_line()
-            .into_iter()
-            .map(|note| note.id.clone())
-            .collect();
-        self.composer = Some(QuestionComposer {
+        let related_note_ids = if kind == DraftKind::Question {
+            self.notes_for_current_line()
+                .into_iter()
+                .map(|note| note.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.draft = Some(PromptDraft {
+            kind,
+            target: DraftTarget::New,
             path: self.current_path().to_string(),
             anchor,
             related_note_ids,
-            prompt: TextBuffer::default(),
-            why: TextBuffer::default(),
-            field: ComposerField::Prompt,
+            buffer: TextBuffer::default(),
+            original_text: String::new(),
         });
-        self.input_mode = InputMode::QuestionComposer;
-        self.message = Some("compose the follow-up prompt; Ctrl-S saves the question".to_string());
+        self.input_mode = InputMode::Draft;
+        self.message = Some(
+            match kind {
+                DraftKind::Question => {
+                    "compose the follow-up question; Ctrl-S saves, Ctrl-O opens the external editor"
+                }
+                DraftKind::Note => {
+                    "write the note body; Ctrl-S saves, Ctrl-O opens the external editor"
+                }
+            }
+            .to_string(),
+        );
     }
 
-    pub fn cancel_question(&mut self) {
-        self.composer = None;
+    pub fn request_close_draft(&mut self) {
+        let Some(draft) = &self.draft else {
+            return;
+        };
+        if draft.is_dirty() {
+            self.input_mode = InputMode::DraftConfirm;
+            self.message = Some("save the draft before closing? y=yes, n=no".to_string());
+        } else {
+            self.discard_draft();
+        }
+    }
+
+    pub fn discard_draft(&mut self) {
+        self.draft = None;
         self.input_mode = InputMode::Normal;
-        self.message = Some("question discarded".to_string());
+        self.message = Some("draft closed".to_string());
+    }
+
+    pub fn resume_draft(&mut self) {
+        if self.draft.is_some() {
+            self.input_mode = InputMode::Draft;
+            self.message = Some("continue editing the draft".to_string());
+        }
     }
 
     pub fn begin_file_picker(&mut self) -> Result<()> {
@@ -386,7 +484,7 @@ impl App {
             .map(|note| SearchMatch {
                 path: note.path.clone(),
                 line: note.anchor.start_line,
-                label: note.title.clone(),
+                label: format!("Note: {}", note.title),
                 preview: note.body.clone(),
             })
             .chain(self.packet.questions.iter().filter_map(|question| {
@@ -476,35 +574,86 @@ impl App {
         true
     }
 
-    pub fn commit_question(&mut self) -> Result<()> {
-        let Some(composer) = self.composer.take() else {
+    pub fn commit_draft(&mut self) -> Result<()> {
+        let Some(draft) = self.draft.take() else {
             return Ok(());
         };
 
-        let prompt = composer.prompt.text.trim().to_string();
-        if prompt.is_empty() {
-            self.composer = Some(composer);
-            self.message = Some("question prompt cannot be empty".to_string());
+        let text = draft.buffer.text.trim().to_string();
+        if text.is_empty() {
+            self.draft = Some(draft);
+            self.message = Some("the draft cannot be empty".to_string());
             return Ok(());
         }
 
-        let why = match composer.why.text.trim() {
-            "" => None,
-            why => Some(why.to_string()),
-        };
+        self.packet.ensure_file(draft.path.clone());
+        match draft.target {
+            DraftTarget::New => match draft.kind {
+                DraftKind::Question => {
+                    self.packet.questions.push(Question::new(
+                        draft.path.clone(),
+                        Some(draft.anchor),
+                        text,
+                        None,
+                        draft.related_note_ids,
+                    ));
+                }
+                DraftKind::Note => {
+                    self.packet.notes.push(Note::new(
+                        draft.path.clone(),
+                        draft.anchor,
+                        NoteKind::Overview,
+                        note_title_from_text(&text),
+                        text,
+                        Vec::new(),
+                        None,
+                        NoteSource::Human,
+                    ));
+                }
+            },
+            DraftTarget::EditNote { index } => {
+                if let Some(note) = self.packet.notes.get_mut(index) {
+                    note.path = draft.path.clone();
+                    note.anchor = draft.anchor;
+                    note.title = note_title_from_text(&text);
+                    note.body = text;
+                    note.updated_at = Utc::now();
+                }
+            }
+            DraftTarget::EditQuestion { index } => {
+                if let Some(question) = self.packet.questions.get_mut(index) {
+                    question.path = draft.path.clone();
+                    question.anchor = Some(draft.anchor);
+                    question.prompt = text;
+                    question.why = None;
+                    question.related_note_ids = draft.related_note_ids;
+                    question.updated_at = Utc::now();
+                }
+            }
+        }
 
-        self.packet.ensure_file(composer.path.clone());
-        self.packet.questions.push(Question::new(
-            composer.path,
-            Some(composer.anchor),
-            prompt,
-            why,
-            composer.related_note_ids,
-        ));
         self.packet.touch();
         self.dirty = true;
         self.input_mode = InputMode::Normal;
-        self.message = Some("question staged; press s to save or x to save and export".to_string());
+        self.message = Some(
+            match (draft.kind, draft.target) {
+                (DraftKind::Question, DraftTarget::New) => {
+                    "question staged; press s to save or x to save and export"
+                }
+                (DraftKind::Note, DraftTarget::New) => {
+                    "note staged; press s to save or keep reading"
+                }
+                (DraftKind::Question, DraftTarget::EditQuestion { .. }) => {
+                    "question updated; press s to save or x to save and export"
+                }
+                (DraftKind::Note, DraftTarget::EditNote { .. }) => {
+                    "note updated; press s to save or keep reading"
+                }
+                (DraftKind::Question, DraftTarget::EditNote { .. })
+                | (DraftKind::Note, DraftTarget::EditQuestion { .. }) => "annotation updated",
+            }
+            .to_string(),
+        );
         Ok(())
     }
 
@@ -612,6 +761,9 @@ impl App {
         self.cursor_line = 1;
         self.scroll = 0;
         self.ensure_cursor_visible();
+        if self.files.is_empty() {
+            let _ = self.begin_file_picker();
+        }
         self.message = Some(format!(
             "removed {path} and purged {removed_notes} notes, {removed_questions} questions"
         ));
@@ -741,6 +893,23 @@ impl App {
             .collect()
     }
 
+    fn current_note_index(&self) -> Option<usize> {
+        let path = self.current_path();
+        self.packet
+            .notes
+            .iter()
+            .rposition(|note| note.path == path && note_covers_line(note, self.cursor_line))
+    }
+
+    fn current_question_index(&self) -> Option<usize> {
+        let path = self.current_path();
+        self.packet.questions.iter().rposition(|question| {
+            question.path == path
+                && question.status == QuestionStatus::Open
+                && question_covers_line(question, self.cursor_line)
+        })
+    }
+
     fn ensure_cursor_visible(&mut self) {
         if self.view_metrics.line_to_row.is_empty() {
             self.scroll = 0;
@@ -818,6 +987,17 @@ impl TextBuffer {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+    }
+
+    pub fn from_text(text: String) -> Self {
+        let cursor = text.len();
+        Self { text, cursor }
+    }
+}
+
+impl PromptDraft {
+    pub fn is_dirty(&self) -> bool {
+        self.buffer.text.trim() != self.original_text.trim()
     }
 }
 
@@ -976,13 +1156,26 @@ fn question_covers_line(question: &Question, line: usize) -> bool {
     line >= anchor.start_line && line <= end
 }
 
+fn note_title_from_text(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Note");
+    let compact = first_line.trim();
+    if compact.chars().count() <= 48 {
+        compact.to_string()
+    } else {
+        format!("{}...", compact.chars().take(45).collect::<String>())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
     use crate::model::{Note, NoteKind, NoteSource, Packet, Question, TrackedFile};
 
-    use super::{App, FocusPane, TextBuffer};
+    use super::{App, DraftKind, FocusPane, InputMode, TextBuffer};
     use crate::model::Anchor;
 
     #[test]
@@ -1020,21 +1213,77 @@ mod tests {
         let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
         app.focus = FocusPane::Source;
         app.begin_question();
-        {
-            let prompt = app.active_buffer_mut();
-            prompt.text = "Why is main empty?".to_string();
-            prompt.cursor = prompt.text.len();
-        }
-        app.toggle_composer_field();
-        {
-            let why = app.active_buffer_mut();
-            why.text = "The note explains what it is, not why it is currently a stub.".to_string();
-            why.cursor = why.text.len();
-        }
-        app.commit_question().unwrap();
+        let prompt = app.active_draft_buffer_mut();
+        prompt.text = "Why is main empty?".to_string();
+        prompt.cursor = prompt.text.len();
+        app.commit_draft().unwrap();
         assert_eq!(app.packet.questions.len(), 1);
         assert!(app.dirty);
         assert_eq!(app.packet.questions[0].related_note_ids.len(), 1);
+    }
+
+    #[test]
+    fn can_start_note_draft() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.begin_note();
+        assert_eq!(app.input_mode, InputMode::Draft);
+        assert_eq!(
+            app.draft.as_ref().map(|draft| draft.kind),
+            Some(DraftKind::Note)
+        );
+    }
+
+    #[test]
+    fn esc_requests_save_confirmation_for_dirty_draft() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.begin_question();
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "What is this?".to_string();
+        buffer.cursor = buffer.text.len();
+        app.request_close_draft();
+        assert_eq!(app.input_mode, InputMode::DraftConfirm);
+    }
+
+    #[test]
+    fn can_reopen_and_edit_existing_question() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        packet.questions.push(Question::new(
+            "main.rs",
+            Some(Anchor::new(1, None)),
+            "Original question?",
+            None,
+            Vec::new(),
+        ));
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.begin_edit_current_annotation(false);
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "Updated question?".to_string();
+        buffer.cursor = buffer.text.len();
+        app.commit_draft().unwrap();
+        assert_eq!(app.packet.questions[0].prompt, "Updated question?");
     }
 
     #[test]
@@ -1119,7 +1368,7 @@ mod tests {
         std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
         let packet = Packet::new("tour", "Tour", temp.path().display().to_string(), vec![]);
         let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
-        assert_eq!(app.input_mode, super::InputMode::FilePicker);
+        assert_eq!(app.input_mode, InputMode::FilePicker);
         assert!(app.commit_file_picker_selection());
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.current_path(), "src/main.rs");

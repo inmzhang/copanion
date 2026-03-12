@@ -1,17 +1,20 @@
 mod app;
 mod render;
 
+use std::fs;
 use std::io::{self, Stdout};
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use uuid::Uuid;
 
 use crate::storage;
 
@@ -53,6 +56,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.input_mode == InputMode::Draft
+                        && matches!(key.code, KeyCode::Char('o'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        edit_draft_in_editor(terminal, app)?;
+                        continue;
+                    }
+
                     if app.input_mode == InputMode::Normal {
                         if pending_d {
                             pending_d = false;
@@ -114,10 +125,25 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
+fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.hide_cursor()?;
+    Ok(())
+}
+
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
-        InputMode::QuestionComposer => handle_composer_mode(app, key),
+        InputMode::Draft => handle_draft_mode(app, key),
+        InputMode::DraftConfirm => handle_draft_confirm_mode(app, key),
         InputMode::FilePicker => handle_file_picker_mode(app, key),
         InputMode::Search => handle_search_mode(app, key),
         InputMode::Help => handle_help_mode(app, key),
@@ -147,6 +173,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::PageDown => app.page_down(),
         KeyCode::PageUp => app.page_up(),
         KeyCode::Char('a') => app.begin_question(),
+        KeyCode::Char('n') => app.begin_note(),
+        KeyCode::Char('i') => app.begin_edit_current_annotation(false),
+        KeyCode::Char('I') => app.begin_edit_current_annotation(true),
         KeyCode::Char('f') => app.begin_file_picker()?,
         KeyCode::Char('/') => app.begin_search(),
         KeyCode::Char('r') => app.reload_sources()?,
@@ -159,29 +188,38 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_composer_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+fn handle_draft_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Esc => app.cancel_question(),
-        KeyCode::Tab => app.toggle_composer_field(),
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => app.commit_question()?,
+        KeyCode::Esc => app.request_close_draft(),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => app.commit_draft()?,
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.commit_question()?
+            app.commit_draft()?
         }
-        KeyCode::Enter => app.active_buffer_mut().insert('\n'),
-        KeyCode::Backspace => app.active_buffer_mut().backspace(),
-        KeyCode::Left => app.active_buffer_mut().move_left(),
-        KeyCode::Right => app.active_buffer_mut().move_right(),
-        KeyCode::Home => app.active_buffer_mut().move_home(),
-        KeyCode::End => app.active_buffer_mut().move_end(),
+        KeyCode::Enter => app.active_draft_buffer_mut().insert('\n'),
+        KeyCode::Backspace => app.active_draft_buffer_mut().backspace(),
+        KeyCode::Left => app.active_draft_buffer_mut().move_left(),
+        KeyCode::Right => app.active_draft_buffer_mut().move_right(),
+        KeyCode::Home => app.active_draft_buffer_mut().move_home(),
+        KeyCode::End => app.active_draft_buffer_mut().move_end(),
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.active_buffer_mut().clear()
+            app.active_draft_buffer_mut().clear()
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.active_buffer_mut().insert(ch)
+            app.active_draft_buffer_mut().insert(ch)
         }
         _ => {}
     }
 
+    Ok(())
+}
+
+fn handle_draft_confirm_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => app.commit_draft()?,
+        KeyCode::Char('n') | KeyCode::Char('N') => app.discard_draft(),
+        KeyCode::Esc => app.resume_draft(),
+        _ => {}
+    }
     Ok(())
 }
 
@@ -248,6 +286,14 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             app.input_mode = InputMode::Normal;
             app.begin_question();
         }
+        KeyCode::Char('n') => {
+            app.input_mode = InputMode::Normal;
+            app.begin_note();
+        }
+        KeyCode::Char('i') => {
+            app.input_mode = InputMode::Normal;
+            app.begin_edit_current_annotation(false);
+        }
         KeyCode::Char('f') => {
             app.input_mode = InputMode::Normal;
             app.begin_file_picker()?;
@@ -271,5 +317,41 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
 
+    Ok(())
+}
+
+fn edit_draft_in_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .map_err(|_| anyhow!("set VISUAL or EDITOR to use external editing"))?;
+    let Some(draft) = app.draft.as_mut() else {
+        return Ok(());
+    };
+
+    let edit_path = std::env::temp_dir().join(format!("copanion-draft-{}.md", Uuid::new_v4()));
+    fs::write(&edit_path, &draft.buffer.text)?;
+
+    suspend_terminal(terminal)?;
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("\"$COPANION_EDITOR\" \"$COPANION_EDIT_PATH\"")
+        .env("COPANION_EDITOR", editor)
+        .env("COPANION_EDIT_PATH", &edit_path)
+        .status();
+    resume_terminal(terminal)?;
+
+    let status = status?;
+    if !status.success() {
+        let _ = fs::remove_file(&edit_path);
+        return Err(anyhow!("the external editor exited with {status}"));
+    }
+
+    let edited = fs::read_to_string(&edit_path)?;
+    let _ = fs::remove_file(&edit_path);
+    draft.buffer = self::app::TextBuffer::from_text(edited);
+    app.message = Some("draft updated from the external editor".to_string());
     Ok(())
 }

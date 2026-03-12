@@ -7,6 +7,7 @@ use crate::clipboard;
 use crate::export;
 use crate::model::Packet;
 use crate::storage::{self, SessionPaths};
+use crate::theme::{self, ThemeName};
 use crate::tui;
 use crate::util::human_title;
 
@@ -39,10 +40,14 @@ pub struct Cli {
     /// Print exports to stdout instead of copying them to the clipboard.
     #[arg(long)]
     stdout: bool,
+    /// Built-in UI theme.
+    #[arg(long, value_enum, default_value_t = ThemeName::Dark)]
+    theme: ThemeName,
 }
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    theme::set_active(cli.theme);
     let cwd = std::env::current_dir().context("failed to read the current directory")?;
     let paths = SessionPaths::discover()?;
     paths.ensure_initialized()?;

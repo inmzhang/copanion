@@ -6,6 +6,8 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+use crate::theme;
+
 pub type StyledSegments = Vec<(Style, String)>;
 
 pub fn highlight_file(path: &str, lines: &[String]) -> Vec<StyledSegments> {
@@ -39,15 +41,17 @@ fn syntax_set() -> &'static SyntaxSet {
 }
 
 fn theme() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME.get_or_init(|| {
-        let themes = ThemeSet::load_defaults();
-        themes
-            .themes
-            .get("base16-ocean.dark")
-            .cloned()
-            .unwrap_or_else(|| themes.themes.values().next().cloned().unwrap_or_default())
-    })
+    theme_set()
+        .themes
+        .get(theme::active().syntect_theme)
+        .or_else(|| theme_set().themes.get("base16-ocean.dark"))
+        .or_else(|| theme_set().themes.values().next())
+        .expect("syntect default theme set should not be empty")
+}
+
+fn theme_set() -> &'static ThemeSet {
+    static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
 fn to_ratatui_style(style: syntect::highlighting::Style) -> Style {
@@ -86,5 +90,18 @@ mod tests {
         );
         assert_eq!(highlighted.len(), 1);
         assert!(!highlighted[0].is_empty());
+    }
+
+    #[test]
+    fn toml_python_and_typescript_highlight_by_default() {
+        for (path, line) in [
+            ("Cargo.toml", "version = \"0.1.0\""),
+            ("tool.py", "def main():"),
+            ("widget.ts", "export const x: number = 1;"),
+        ] {
+            let highlighted = highlight_file(path, &[line.to_string()]);
+            assert_eq!(highlighted.len(), 1);
+            assert!(!highlighted[0].is_empty());
+        }
     }
 }
