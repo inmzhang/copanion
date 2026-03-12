@@ -136,6 +136,8 @@ fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.hide_cursor()?;
+    terminal.clear()?;
+    terminal.autoresize()?;
     Ok(())
 }
 
@@ -327,12 +329,12 @@ fn edit_draft_in_editor(
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .map_err(|_| anyhow!("set VISUAL or EDITOR to use external editing"))?;
-    let Some(draft) = app.draft.as_mut() else {
+    let Some(initial_text) = app.draft.as_ref().map(|draft| draft.buffer.text.clone()) else {
         return Ok(());
     };
 
     let edit_path = std::env::temp_dir().join(format!("copanion-draft-{}.md", Uuid::new_v4()));
-    fs::write(&edit_path, &draft.buffer.text)?;
+    fs::write(&edit_path, initial_text)?;
 
     suspend_terminal(terminal)?;
     let status = Command::new("sh")
@@ -342,6 +344,7 @@ fn edit_draft_in_editor(
         .env("COPANION_EDIT_PATH", &edit_path)
         .status();
     resume_terminal(terminal)?;
+    terminal.draw(|frame| render::render(frame, app))?;
 
     let status = status?;
     if !status.success() {
@@ -351,6 +354,9 @@ fn edit_draft_in_editor(
 
     let edited = fs::read_to_string(&edit_path)?;
     let _ = fs::remove_file(&edit_path);
+    let Some(draft) = app.draft.as_mut() else {
+        return Ok(());
+    };
     draft.buffer = self::app::TextBuffer::from_text(edited);
     app.message = Some("draft updated from the external editor".to_string());
     Ok(())
