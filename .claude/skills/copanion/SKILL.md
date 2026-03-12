@@ -9,6 +9,8 @@ description: "Use when a user wants durable Copanion updates in the canonical pe
 
 Use this skill when the user wants durable Copanion state, not just a chat answer. The canonical packet under Copanion's system data directory is the source of truth for both study notes and question-thread conversations.
 
+The portable Claude Code bundle lives at `../../skill/`. This repo-local mirror exists so Claude sessions inside this repository do not need to reach into `.agents/skills/`.
+
 ## Trigger Gate
 
 Use this skill only when one of these is true:
@@ -40,11 +42,11 @@ Use this when the user wants durable learning notes on a small explicit file set
 - Keep the tracked file list intentionally small.
 - Read only the target files and the immediate neighbors needed for a correct explanation.
 - Plan notes/questions first, then materialize them in one pass.
-- Read [packet-plan.md](./references/packet-plan.md) for the structured shape.
-- Prefer the bundled helper:
+- Read [packet-plan.md](../../skill/references/packet-plan.md) for the structured shape.
+- Prefer the bundled helper from the shared Claude bundle:
 
 ```bash
-python <skill-directory>/scripts/apply_session_plan.py \
+python <skill-directory>/../../skill/scripts/apply_session_plan.py \
   --plan /tmp/copanion-plan.json
 ```
 

@@ -1,0 +1,9 @@
+{
+  "name": "copanion",
+  "version": "0.1.0",
+  "description": "Write durable Copanion study notes and question-thread replies back into the canonical per-project packet",
+  "author": {
+    "name": "copanion contributors"
+  },
+  "skills": ["./"]
+}
