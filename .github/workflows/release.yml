@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - bump-patch
+          - bump-minor
+          - bump-major
+
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release-pr:
+    name: Create Release PR
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.action, 'bump-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@git-cliff
+
+      - name: Get current version
+        id: current
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Calculate new version
+        id: next
+        run: |
+          IFS='.' read -r major minor patch <<< "${{ steps.current.outputs.version }}"
+          case "${{ inputs.action }}" in
+            bump-major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            bump-minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            bump-patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+          VERSION="${major}.${minor}.${patch}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.next.outputs.version }}"/' Cargo.toml
+
+      - name: Update Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Generate changelog
+        run: git cliff --tag "v${{ steps.next.outputs.version }}" -o CHANGELOG.md
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore(release): prepare v${{ steps.next.outputs.version }}"
+          branch: release/v${{ steps.next.outputs.version }}
+          title: "release: v${{ steps.next.outputs.version }}"
+          body: |
+            Prepares `copanion` v${{ steps.next.outputs.version }}.
+
+            This PR updates:
+            - `Cargo.toml`
+            - `Cargo.lock`
+            - `CHANGELOG.md`
+
+            After merge, the release workflow will tag the version, publish to crates.io, and create the GitHub release.
+
+  publish:
+    name: Publish Release
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
