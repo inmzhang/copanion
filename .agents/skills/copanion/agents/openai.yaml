@@ -1,0 +1,4 @@
+interface:
+  display_name: "Copanion"
+  short_description: "Update Copanion's per-project packet with study notes or answered question threads"
+  default_prompt: "Use $copanion to save line-anchored study notes for explicit files or to answer exported Copanion question threads back into the canonical project packet."

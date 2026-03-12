@@ -5,6 +5,8 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const PACKET_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Packet {
     pub version: u32,
@@ -58,7 +60,18 @@ pub struct Question {
     pub why: Option<String>,
     #[serde(default)]
     pub related_note_ids: Vec<String>,
+    #[serde(default)]
+    pub conversation: Vec<QuestionMessage>,
     pub status: QuestionStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionMessage {
+    pub id: String,
+    pub role: QuestionMessageRole,
+    pub body: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -104,6 +117,13 @@ pub enum QuestionStatus {
     Archived,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuestionMessageRole {
+    User,
+    Agent,
+}
+
 impl Packet {
     pub fn new(
         session_id: impl Into<String>,
@@ -113,7 +133,7 @@ impl Packet {
     ) -> Self {
         let now = Utc::now();
         Self {
-            version: 1,
+            version: PACKET_VERSION,
             session_id: session_id.into(),
             title: title.into(),
             workspace_root: workspace_root.into(),
@@ -144,6 +164,11 @@ impl Packet {
         self.questions
             .iter()
             .filter(|question| question.status == QuestionStatus::Open)
+    }
+
+    pub fn questions_requiring_reply(&self) -> impl Iterator<Item = &Question> {
+        self.open_questions()
+            .filter(|question| question.needs_agent_reply())
     }
 }
 
@@ -202,7 +227,36 @@ impl Question {
             prompt: prompt.into(),
             why,
             related_note_ids,
+            conversation: Vec::new(),
             status: QuestionStatus::Open,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn add_message(&mut self, role: QuestionMessageRole, body: impl Into<String>) {
+        self.conversation.push(QuestionMessage::new(role, body));
+        self.updated_at = Utc::now();
+    }
+
+    pub fn needs_agent_reply(&self) -> bool {
+        if self.status != QuestionStatus::Open {
+            return false;
+        }
+        match self.conversation.last() {
+            Some(message) => message.role == QuestionMessageRole::User,
+            None => true,
+        }
+    }
+}
+
+impl QuestionMessage {
+    pub fn new(role: QuestionMessageRole, body: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: format!("question-message-{}", Uuid::new_v4().simple()),
+            role,
+            body: body.into(),
             created_at: now,
             updated_at: now,
         }
@@ -228,5 +282,14 @@ impl Anchor {
 impl fmt::Display for Anchor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.display())
+    }
+}
+
+impl QuestionMessageRole {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::User => "Follow-up",
+            Self::Agent => "Agent Reply",
+        }
     }
 }

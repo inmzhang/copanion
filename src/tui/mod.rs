@@ -84,7 +84,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                             pending_d = true;
                             app.message = Some(match app.focus {
                                 FocusPane::Files => {
-                                    "press d again to remove the selected file from this session"
+                                    "press d again to remove the selected file from this packet"
                                 }
                                 FocusPane::Source => {
                                     "press d again to delete the note or question at the current line"
@@ -177,12 +177,19 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::PageUp => app.page_up(),
         KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
         KeyCode::Char('a') => app.begin_question(),
+        KeyCode::Char('c') => app.begin_question_follow_up(),
+        KeyCode::Char('o') => {
+            app.reopen_current_question();
+        }
         KeyCode::Char('n') => app.begin_note(),
         KeyCode::Char('i') => app.begin_edit_current_annotation(false),
         KeyCode::Char('I') => app.begin_edit_current_annotation(true),
+        KeyCode::Char('r') => {
+            app.resolve_current_question();
+        }
         KeyCode::Char('f') => app.begin_file_picker()?,
         KeyCode::Char('/') => app.begin_search(),
-        KeyCode::Char('r') => app.reload_sources()?,
+        KeyCode::Char('R') => app.reload_sources()?,
         KeyCode::Char('s') => app.save()?,
         KeyCode::Char('y') => app.export_questions()?,
         KeyCode::Char('x') => app.save_and_quit()?,
@@ -310,6 +317,14 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
             app.input_mode = InputMode::Normal;
             app.begin_question();
         }
+        KeyCode::Char('c') => {
+            app.input_mode = InputMode::Normal;
+            app.begin_question_follow_up();
+        }
+        KeyCode::Char('o') => {
+            app.input_mode = InputMode::Normal;
+            app.reopen_current_question();
+        }
         KeyCode::Char('n') => {
             app.input_mode = InputMode::Normal;
             app.begin_note();
@@ -325,6 +340,14 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('f') => {
             app.input_mode = InputMode::Normal;
             app.begin_file_picker()?;
+        }
+        KeyCode::Char('r') => {
+            app.input_mode = InputMode::Normal;
+            app.resolve_current_question();
+        }
+        KeyCode::Char('R') => {
+            app.input_mode = InputMode::Normal;
+            app.reload_sources()?;
         }
         KeyCode::Char('/') => {
             app.input_mode = InputMode::Normal;

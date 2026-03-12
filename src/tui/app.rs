@@ -11,7 +11,9 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::clipboard;
 use crate::export;
-use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, QuestionStatus};
+use crate::model::{
+    Anchor, Note, NoteKind, NoteSource, Packet, Question, QuestionMessageRole, QuestionStatus,
+};
 use crate::{storage, syntax};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -41,7 +43,9 @@ pub enum DraftKind {
 pub enum DraftTarget {
     New,
     EditNote { index: usize },
-    EditQuestion { index: usize },
+    EditQuestionPrompt { index: usize },
+    EditQuestionMessage { question_index: usize, message_index: usize },
+    ContinueQuestion { index: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -285,6 +289,37 @@ impl App {
         self.begin_new_draft(DraftKind::Question);
     }
 
+    pub fn begin_question_follow_up(&mut self) {
+        if self.files.is_empty() {
+            self.message = Some("add a tracked file before continuing a question".to_string());
+            return;
+        }
+        let Some(index) = self.current_open_question_index() else {
+            self.message =
+                Some("there is no open question thread on the current line to continue".to_string());
+            return;
+        };
+        let question = &self.packet.questions[index];
+        self.discard_guard = false;
+        self.visual_anchor = None;
+        self.draft = Some(PromptDraft {
+            kind: DraftKind::Question,
+            target: DraftTarget::ContinueQuestion { index },
+            path: question.path.clone(),
+            anchor: question
+                .anchor
+                .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+            related_note_ids: question.related_note_ids.clone(),
+            buffer: TextBuffer::default(),
+            original_text: String::new(),
+        });
+        self.input_mode = InputMode::Draft;
+        self.message = Some(
+            "continue the conversation; Ctrl-S saves, Ctrl-O opens the external editor"
+                .to_string(),
+        );
+    }
+
     pub fn begin_note(&mut self) {
         self.begin_new_draft(DraftKind::Note);
     }
@@ -329,15 +364,15 @@ impl App {
             return;
         }
         let note_index = self.current_note_index();
-        let question_index = self.current_question_index();
+        let question_target = self
+            .current_question_index()
+            .map(|index| self.latest_question_draft_target(index));
         let choice = if prefer_note {
             note_index
                 .map(|index| DraftTarget::EditNote { index })
-                .or_else(|| question_index.map(|index| DraftTarget::EditQuestion { index }))
+                .or(question_target)
         } else {
-            question_index
-                .map(|index| DraftTarget::EditQuestion { index })
-                .or_else(|| note_index.map(|index| DraftTarget::EditNote { index }))
+            question_target.or_else(|| note_index.map(|index| DraftTarget::EditNote { index }))
         };
 
         let Some(target) = choice else {
@@ -359,7 +394,7 @@ impl App {
                     original_text: note.body.clone(),
                 }
             }
-            DraftTarget::EditQuestion { index } => {
+            DraftTarget::EditQuestionPrompt { index } => {
                 let question = &self.packet.questions[index];
                 PromptDraft {
                     kind: DraftKind::Question,
@@ -372,6 +407,27 @@ impl App {
                     buffer: TextBuffer::from_text(question.prompt.clone()),
                     original_text: question.prompt.clone(),
                 }
+            }
+            DraftTarget::EditQuestionMessage {
+                question_index,
+                message_index,
+            } => {
+                let question = &self.packet.questions[question_index];
+                let message = &question.conversation[message_index];
+                PromptDraft {
+                    kind: DraftKind::Question,
+                    target,
+                    path: question.path.clone(),
+                    anchor: question
+                        .anchor
+                        .unwrap_or_else(|| Anchor::new(self.cursor_line, None)),
+                    related_note_ids: question.related_note_ids.clone(),
+                    buffer: TextBuffer::from_text(message.body.clone()),
+                    original_text: message.body.clone(),
+                }
+            }
+            DraftTarget::ContinueQuestion { .. } => {
+                unreachable!("edit path cannot pick a continuation target")
             }
             DraftTarget::New => unreachable!("edit path cannot pick a new target"),
         };
@@ -529,8 +585,8 @@ impl App {
                 question.anchor.map(|anchor| SearchMatch {
                     path: question.path.clone(),
                     line: anchor_display_line(anchor),
-                    label: "Question".to_string(),
-                    preview: question.prompt.clone(),
+                    label: format!("Question ({})", question_status_label(question.status)),
+                    preview: question_search_preview(question),
                 })
             }))
             .collect::<Vec<_>>();
@@ -649,6 +705,12 @@ impl App {
                     ));
                 }
             },
+            DraftTarget::ContinueQuestion { index } => {
+                if let Some(question) = self.packet.questions.get_mut(index) {
+                    question.add_message(QuestionMessageRole::User, text);
+                    question.status = QuestionStatus::Open;
+                }
+            }
             DraftTarget::EditNote { index } => {
                 if let Some(note) = self.packet.notes.get_mut(index) {
                     note.path = draft.path.clone();
@@ -658,13 +720,32 @@ impl App {
                     note.updated_at = Utc::now();
                 }
             }
-            DraftTarget::EditQuestion { index } => {
+            DraftTarget::EditQuestionPrompt { index } => {
                 if let Some(question) = self.packet.questions.get_mut(index) {
                     question.path = draft.path.clone();
                     question.anchor = Some(draft.anchor);
                     question.prompt = text;
                     question.why = None;
                     question.related_note_ids = draft.related_note_ids;
+                    question.conversation.clear();
+                    question.status = QuestionStatus::Open;
+                    question.updated_at = Utc::now();
+                }
+            }
+            DraftTarget::EditQuestionMessage {
+                question_index,
+                message_index,
+            } => {
+                if let Some(question) = self.packet.questions.get_mut(question_index) {
+                    question.path = draft.path.clone();
+                    question.anchor = Some(draft.anchor);
+                    question.related_note_ids = draft.related_note_ids;
+                    if let Some(message) = question.conversation.get_mut(message_index) {
+                        message.body = text;
+                        message.updated_at = Utc::now();
+                    }
+                    question.conversation.truncate(message_index + 1);
+                    question.status = QuestionStatus::Open;
                     question.updated_at = Utc::now();
                 }
             }
@@ -678,17 +759,23 @@ impl App {
                 (DraftKind::Question, DraftTarget::New) => {
                     "question staged; press s to save or x to save and export"
                 }
+                (DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
+                    "follow-up staged; press s to save or x to save and export"
+                }
                 (DraftKind::Note, DraftTarget::New) => {
                     "note staged; press s to save or keep reading"
                 }
-                (DraftKind::Question, DraftTarget::EditQuestion { .. }) => {
+                (DraftKind::Question, DraftTarget::EditQuestionPrompt { .. })
+                | (DraftKind::Question, DraftTarget::EditQuestionMessage { .. }) => {
                     "question updated; press s to save or x to save and export"
                 }
                 (DraftKind::Note, DraftTarget::EditNote { .. }) => {
                     "note updated; press s to save or keep reading"
                 }
                 (DraftKind::Question, DraftTarget::EditNote { .. })
-                | (DraftKind::Note, DraftTarget::EditQuestion { .. }) => "annotation updated",
+                | (DraftKind::Note, DraftTarget::EditQuestionPrompt { .. })
+                | (DraftKind::Note, DraftTarget::EditQuestionMessage { .. })
+                | (DraftKind::Note, DraftTarget::ContinueQuestion { .. }) => "annotation updated",
             }
             .to_string(),
         );
@@ -704,7 +791,7 @@ impl App {
     }
 
     pub fn export_questions(&mut self) -> Result<()> {
-        let export = export::generate_question_export(&self.packet)?;
+        let export = export::generate_question_export(&self.packet, &self.packet_path)?;
         self.discard_guard = false;
         if self.output_to_stdout {
             self.message = Some("open questions rendered to stdout on exit".to_string());
@@ -718,8 +805,8 @@ impl App {
 
     pub fn save_and_quit(&mut self) -> Result<()> {
         self.save()?;
-        let notice = if self.packet.open_questions().count() > 0 {
-            let export = export::generate_question_export(&self.packet)?;
+        let notice = if self.packet.questions_requiring_reply().count() > 0 {
+            let export = export::generate_question_export(&self.packet, &self.packet_path)?;
             if self.output_to_stdout {
                 self.quit_export = Some(export);
                 format!(
@@ -809,6 +896,15 @@ impl App {
     }
 
     pub fn delete_annotation_at_cursor(&mut self) -> bool {
+        if let Some(index) = self.current_question_index() {
+            let deleted = self.delete_latest_question_turn(index);
+            self.packet.touch();
+            self.dirty = true;
+            self.discard_guard = false;
+            self.message = Some(deleted);
+            return true;
+        }
+
         let path = self.current_path().to_string();
         if let Some(index) = self
             .packet
@@ -824,19 +920,83 @@ impl App {
             return true;
         }
 
-        if let Some(index) = self.packet.questions.iter().rposition(|question| {
-            question.path == path && question_covers_line(question, self.cursor_line)
-        }) {
-            let deleted = self.packet.questions.remove(index);
-            self.packet.touch();
-            self.dirty = true;
-            self.discard_guard = false;
-            self.message = Some(format!("deleted question {}", deleted.id));
-            return true;
-        }
-
         self.message = Some("no note or question is attached to the current line".to_string());
         false
+    }
+
+    fn delete_latest_question_turn(&mut self, index: usize) -> String {
+        let Some(message_index) = self
+            .packet
+            .questions
+            .get(index)
+            .and_then(latest_user_message_index)
+        else {
+            let deleted = self.packet.questions.remove(index);
+            return format!("deleted question {}", deleted.id);
+        };
+
+        let Some(question) = self.packet.questions.get_mut(index) else {
+            return "no question is attached to the current line".to_string();
+        };
+
+        let removed_count = question.conversation.len().saturating_sub(message_index);
+        question.conversation.truncate(message_index);
+        question.status = if question.needs_agent_reply() {
+            QuestionStatus::Open
+        } else {
+            QuestionStatus::Answered
+        };
+        question.updated_at = Utc::now();
+        if removed_count == 1 {
+            format!("deleted latest follow-up from question {}", question.id)
+        } else {
+            format!(
+                "deleted latest follow-up from question {} and {} dependent repl{}",
+                question.id,
+                removed_count - 1,
+                if removed_count == 2 { "y" } else { "ies" }
+            )
+        }
+    }
+
+    pub fn resolve_current_question(&mut self) -> bool {
+        let Some(index) = self.current_open_question_index() else {
+            self.message = Some("there is no open question thread on the current line".to_string());
+            return false;
+        };
+        let question_id = {
+            let question = &mut self.packet.questions[index];
+            question.status = QuestionStatus::Answered;
+            question.updated_at = Utc::now();
+            question.id.clone()
+        };
+        self.packet.touch();
+        self.dirty = true;
+        self.discard_guard = false;
+        self.message = Some(format!("resolved question {question_id}"));
+        true
+    }
+
+    pub fn reopen_current_question(&mut self) -> bool {
+        let Some(index) = self.current_question_index() else {
+            self.message = Some("there is no question thread on the current line".to_string());
+            return false;
+        };
+        if self.packet.questions[index].status == QuestionStatus::Open {
+            self.message = Some("the current question thread is already open".to_string());
+            return false;
+        }
+        let question_id = {
+            let question = &mut self.packet.questions[index];
+            question.status = QuestionStatus::Open;
+            question.updated_at = Utc::now();
+            question.id.clone()
+        };
+        self.packet.touch();
+        self.dirty = true;
+        self.discard_guard = false;
+        self.message = Some(format!("reopened question {question_id}"));
+        true
     }
 
     pub fn request_quit(&mut self) {
@@ -905,6 +1065,16 @@ impl App {
             .count()
     }
 
+    pub fn current_question(&self) -> Option<&Question> {
+        self.current_question_index()
+            .and_then(|index| self.packet.questions.get(index))
+    }
+
+    pub fn current_open_question(&self) -> Option<&Question> {
+        self.current_open_question_index()
+            .and_then(|index| self.packet.questions.get(index))
+    }
+
     pub fn notes_for_current_line(&self) -> Vec<&Note> {
         self.packet
             .notes
@@ -927,7 +1097,7 @@ impl App {
         self.packet
             .questions
             .iter()
-            .filter(|question| question.path == path && question.status == QuestionStatus::Open)
+            .filter(|question| question.path == path)
             .collect()
     }
 
@@ -940,6 +1110,30 @@ impl App {
     }
 
     fn current_question_index(&self) -> Option<usize> {
+        let path = self.current_path();
+        self.packet.questions.iter().rposition(|question| {
+            question.path == path && question_covers_line(question, self.cursor_line)
+        })
+    }
+
+    fn latest_question_draft_target(&self, question_index: usize) -> DraftTarget {
+        match self
+            .packet
+            .questions
+            .get(question_index)
+            .and_then(latest_user_message_index)
+        {
+            Some(message_index) => DraftTarget::EditQuestionMessage {
+                question_index,
+                message_index,
+            },
+            None => DraftTarget::EditQuestionPrompt {
+                index: question_index,
+            },
+        }
+    }
+
+    fn current_open_question_index(&self) -> Option<usize> {
         let path = self.current_path();
         self.packet.questions.iter().rposition(|question| {
             question.path == path
@@ -1240,11 +1434,34 @@ fn note_title_from_text(text: &str) -> String {
     }
 }
 
+fn question_search_preview(question: &Question) -> String {
+    question
+        .conversation
+        .last()
+        .map(|message| format!("{} {}", message.role.label(), message.body))
+        .unwrap_or_else(|| question.prompt.clone())
+}
+
+fn question_status_label(status: QuestionStatus) -> &'static str {
+    match status {
+        QuestionStatus::Open => "open",
+        QuestionStatus::Answered => "answered",
+        QuestionStatus::Archived => "archived",
+    }
+}
+
+fn latest_user_message_index(question: &Question) -> Option<usize> {
+    question
+        .conversation
+        .iter()
+        .rposition(|message| message.role == QuestionMessageRole::User)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
-    use crate::model::{Note, NoteKind, NoteSource, Packet, Question, TrackedFile};
+    use crate::model::{Note, NoteKind, NoteSource, Packet, Question, QuestionStatus, TrackedFile};
 
     use super::{App, DraftKind, FocusPane, InputMode, TextBuffer};
     use crate::model::Anchor;
@@ -1362,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_annotation_prefers_notes_then_questions() {
+    fn delete_annotation_prefers_question_threads_before_notes() {
         let temp = tempdir().unwrap();
         std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
         let mut packet = Packet::new(
@@ -1390,10 +1607,10 @@ mod tests {
         ));
         let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
         assert!(app.delete_annotation_at_cursor());
-        assert!(app.packet.notes.is_empty());
-        assert_eq!(app.packet.questions.len(), 1);
-        assert!(app.delete_annotation_at_cursor());
         assert!(app.packet.questions.is_empty());
+        assert_eq!(app.packet.notes.len(), 1);
+        assert!(app.delete_annotation_at_cursor());
+        assert!(app.packet.notes.is_empty());
     }
 
     #[test]
@@ -1499,6 +1716,176 @@ mod tests {
         let draft = app.draft.as_ref().expect("question draft should exist");
         assert_eq!(draft.anchor, Anchor::new(1, Some(3)));
         assert_eq!(draft.related_note_ids, vec![note_id]);
+    }
+
+    #[test]
+    fn continuing_question_appends_user_follow_up() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut question = Question::new(
+            "main.rs",
+            Some(Anchor::new(2, None)),
+            "Why is this separate?",
+            None,
+            vec![],
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::Agent,
+            "It separates setup from the hot path.",
+        );
+        packet.questions.push(question);
+
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.cursor_line = 2;
+        app.begin_question_follow_up();
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "What invariant depends on that split?".to_string();
+        buffer.cursor = buffer.text.len();
+        app.commit_draft().unwrap();
+
+        assert_eq!(app.packet.questions[0].conversation.len(), 2);
+        assert_eq!(
+            app.packet.questions[0].conversation[1].role,
+            crate::model::QuestionMessageRole::User
+        );
+    }
+
+    #[test]
+    fn editing_question_targets_latest_user_follow_up() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut question = Question::new(
+            "main.rs",
+            Some(Anchor::new(2, None)),
+            "Why is this separate?",
+            None,
+            vec![],
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::Agent,
+            "It separates setup from the hot path.",
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::User,
+            "What invariant depends on that split?",
+        );
+        packet.questions.push(question);
+
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.cursor_line = 2;
+        app.begin_edit_current_annotation(false);
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "Which invariant forces that split?".to_string();
+        buffer.cursor = buffer.text.len();
+        app.commit_draft().unwrap();
+
+        assert_eq!(app.packet.questions[0].prompt, "Why is this separate?");
+        assert_eq!(app.packet.questions[0].conversation.len(), 2);
+        assert_eq!(
+            app.packet.questions[0].conversation[1].body,
+            "Which invariant forces that split?"
+        );
+    }
+
+    #[test]
+    fn deleting_question_targets_latest_user_follow_up() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut question = Question::new(
+            "main.rs",
+            Some(Anchor::new(2, None)),
+            "Why is this separate?",
+            None,
+            vec![],
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::Agent,
+            "It separates setup from the hot path.",
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::User,
+            "What invariant depends on that split?",
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::Agent,
+            "The hot path assumes setup has already frozen the scheduler state.",
+        );
+        packet.questions.push(question);
+
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.cursor_line = 2;
+        assert!(app.delete_annotation_at_cursor());
+        assert_eq!(app.packet.questions.len(), 1);
+        assert_eq!(app.packet.questions[0].conversation.len(), 1);
+        assert_eq!(
+            app.packet.questions[0].conversation[0].role,
+            crate::model::QuestionMessageRole::Agent
+        );
+        assert_eq!(app.packet.questions[0].status, QuestionStatus::Answered);
+    }
+
+    #[test]
+    fn resolving_question_marks_it_answered() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        packet.questions.push(Question::new(
+            "main.rs",
+            Some(Anchor::new(1, None)),
+            "Why is main empty?",
+            None,
+            vec![],
+        ));
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        assert!(app.resolve_current_question());
+        assert_eq!(app.packet.questions[0].status, QuestionStatus::Answered);
+    }
+
+    #[test]
+    fn reopening_question_marks_it_open_again() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut question = Question::new(
+            "main.rs",
+            Some(Anchor::new(1, None)),
+            "Why is main empty?",
+            None,
+            vec![],
+        );
+        question.status = QuestionStatus::Answered;
+        packet.questions.push(question);
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        assert!(app.reopen_current_question());
+        assert_eq!(app.packet.questions[0].status, QuestionStatus::Open);
     }
 
     #[test]

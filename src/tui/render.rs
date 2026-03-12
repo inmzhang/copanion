@@ -7,7 +7,9 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Note, NoteKind, NoteSource, Question};
+use crate::model::{
+    Note, NoteKind, NoteSource, Question, QuestionMessage, QuestionMessageRole, QuestionStatus,
+};
 use crate::theme::{self, Theme};
 
 use super::app::{
@@ -215,9 +217,23 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let focus = status_mode_label(app);
     let dirty = if app.dirty { "unsaved" } else { "saved" };
     let current_notes = app.notes_for_current_line().len();
+    let current_thread = app
+        .current_question()
+        .map(|question| format!("  thread {}", question_status_label(question.status)))
+        .unwrap_or_default();
     let hints = match app.input_mode {
+        InputMode::Normal if app.current_open_question().is_some() => {
+            "Tab focus  j/k move  [] jump  v select  dd delete  a question  c continue  r resolve  R reload  n note  i edit  f add file  / search"
+        }
+        InputMode::Normal
+            if app
+                .current_question()
+                .is_some_and(|question| question.status != QuestionStatus::Open) =>
+        {
+            "Tab focus  j/k move  [] jump  v select  dd delete  a question  o reopen  R reload  n note  i edit  f add file  / search"
+        }
         InputMode::Normal => {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a question  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a question  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Visual => "j/k move  a question  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
@@ -231,26 +247,100 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         .visual_selection()
         .map(|anchor| format!("  visual {}", anchor))
         .unwrap_or_default();
+    let badge_text = format!(" {focus} ");
+    let meta_text = format!(
+        "line {}{}  {}  {} attached notes{}",
+        app.cursor_line, selection, dirty, current_notes, current_thread
+    );
+    let status = fit_status_segments(&badge_text, &meta_text, message, area.width as usize);
     let line = Line::from(vec![
         Span::styled(
-            format!(" {focus} "),
+            status.badge,
             Style::default().fg(theme().bg).bg(theme().accent),
         ),
-        Span::raw(" "),
-        Span::styled(
-            format!(
-                "line {}{}  {}  {} attached notes",
-                app.cursor_line, selection, dirty, current_notes
-            ),
-            Style::default().fg(theme().muted),
-        ),
-        Span::raw("  "),
-        Span::styled(message, Style::default().fg(theme().text)),
+        Span::raw(status.between_badge_and_meta),
+        Span::styled(status.meta, Style::default().fg(theme().muted)),
+        Span::raw(status.between_meta_and_message),
+        Span::styled(status.message, Style::default().fg(theme().text)),
     ]);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(theme().bg)),
         area,
     );
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct StatusSegments {
+    badge: String,
+    between_badge_and_meta: String,
+    meta: String,
+    between_meta_and_message: String,
+    message: String,
+}
+
+fn fit_status_segments(badge: &str, meta: &str, message: &str, total_width: usize) -> StatusSegments {
+    let badge = truncate_to_width_end(badge, total_width);
+    let badge_width = UnicodeWidthStr::width(badge.as_str());
+    let remaining_after_badge = total_width.saturating_sub(badge_width);
+
+    if remaining_after_badge == 0 {
+        return StatusSegments {
+            badge,
+            between_badge_and_meta: String::new(),
+            meta: String::new(),
+            between_meta_and_message: String::new(),
+            message: String::new(),
+        };
+    }
+
+    let gap_after_badge = " ";
+    let gap_after_badge_width = UnicodeWidthStr::width(gap_after_badge);
+    let remaining = remaining_after_badge.saturating_sub(gap_after_badge_width);
+
+    if remaining == 0 {
+        return StatusSegments {
+            badge,
+            between_badge_and_meta: String::new(),
+            meta: String::new(),
+            between_meta_and_message: String::new(),
+            message: String::new(),
+        };
+    }
+
+    let wants_message = !message.is_empty();
+    let separator_width = if wants_message { 2 } else { 0 };
+    let min_message_width = if wants_message { remaining.min(12) } else { 0 };
+    let meta_budget = if wants_message {
+        remaining.saturating_sub(min_message_width + separator_width)
+    } else {
+        remaining
+    };
+    let meta = truncate_to_width_end(meta, meta_budget);
+    let meta_width = UnicodeWidthStr::width(meta.as_str());
+
+    let message_width = if wants_message {
+        remaining
+            .saturating_sub(meta_width)
+            .saturating_sub(separator_width)
+    } else {
+        0
+    };
+    let (between_meta_and_message, message) = if message_width > 0 {
+        (
+            "  ".to_string(),
+            truncate_to_width_end(message, message_width),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    StatusSegments {
+        badge,
+        between_badge_and_meta: gap_after_badge.to_string(),
+        meta,
+        between_meta_and_message,
+        message,
+    }
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
@@ -279,6 +369,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
             "start a visual selection for a ranged note or question",
         ),
         help_line("a", "open a QUESTION draft at the cursor or selected range"),
+        help_line("c", "continue the open question thread under the cursor"),
+        help_line("o", "reopen the resolved question thread under the cursor"),
         help_line("n", "open a NOTE draft at the cursor or selected range"),
         help_line(
             "i",
@@ -289,6 +381,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
             "I",
             "edit the note under the cursor, or fall back to the question",
         ),
+        help_line("r", "resolve the open question thread under the cursor"),
+        help_line("R", "reload tracked file contents from disk"),
         help_line("f", "open the fuzzy file picker and add a tracked file"),
         help_line("/", "fuzzy-search notes and questions, then jump"),
         help_line(
@@ -296,7 +390,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             "delete the selected file or the annotation under the cursor",
         ),
         help_line("Ctrl-O", "open the current draft in $VISUAL or $EDITOR"),
-        help_line("s", "save the session to disk"),
+        help_line("s", "save the packet to disk"),
         help_line("y", "copy the open-question export without quitting"),
         help_line("x", "save, export open questions, and quit"),
         help_line("q", "quit; press twice if there are unsaved changes"),
@@ -776,18 +870,29 @@ fn render_note_card(note: &Note, width: usize) -> Vec<Line<'static>> {
 }
 
 fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>> {
+    let (border_color, background) = question_status_style(question.status);
+    let status = question_status_label(question.status);
+    let reply_count = question.conversation.len();
     let title = question
         .anchor
-        .map(|anchor| format!("open question · line {anchor}"))
-        .unwrap_or_else(|| "open question".to_string());
+        .map(|anchor| {
+            format!(
+                "{} thread · line {} · {} message{}",
+                status,
+                anchor,
+                reply_count,
+                if reply_count == 1 { "" } else { "s" }
+            )
+        })
+        .unwrap_or_else(|| format!("{status} thread"));
     let mut lines = render_card(
         "Question",
         &title,
         &question.prompt,
         question.related_note_ids.as_slice(),
         width,
-        theme().question_border,
-        theme().question_bg,
+        border_color,
+        background,
     );
     lines.insert(
         0,
@@ -796,23 +901,61 @@ fn render_question_card(question: &Question, width: usize) -> Vec<Line<'static>>
             Span::styled(
                 "╭─ ",
                 Style::default()
-                    .fg(theme().question_border)
-                    .bg(theme().question_bg),
+                    .fg(border_color)
+                    .bg(background),
             ),
             Span::styled(
-                "Open Question",
+                question_status_header(question.status),
                 Style::default()
                     .fg(theme().text)
-                    .bg(theme().question_bg)
+                    .bg(background)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  {title}"),
-                Style::default().fg(theme().muted).bg(theme().question_bg),
+                Style::default().fg(theme().muted).bg(background),
             ),
         ]),
     );
+    for message in &question.conversation {
+        lines.extend(render_question_message_card(message, width));
+    }
+    if question.status == QuestionStatus::Open {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().bg(theme().panel)),
+            Span::styled(
+                "↳ ",
+                Style::default().fg(theme().question_border).bg(theme().panel),
+            ),
+            Span::styled(
+                "Actions: c continue thread  r resolve",
+                Style::default().fg(theme().muted).bg(theme().panel),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().bg(theme().panel)),
+            Span::styled("↳ ", Style::default().fg(theme().note_border).bg(theme().panel)),
+            Span::styled(
+                "Actions: o reopen thread",
+                Style::default().fg(theme().muted).bg(theme().panel),
+            ),
+        ]));
+    }
     lines
+}
+
+fn render_question_message_card(message: &QuestionMessage, width: usize) -> Vec<Line<'static>> {
+    let (border_color, background) = question_message_style(message.role);
+    render_card(
+        message.role.label(),
+        message_role_subtitle(message.role),
+        &message.body,
+        &[],
+        width,
+        border_color,
+        background,
+    )
 }
 
 fn render_card(
@@ -937,6 +1080,53 @@ fn note_kind_label(kind: NoteKind) -> &'static str {
         NoteKind::Flow => "flow",
         NoteKind::Pitfall => "pitfall",
         NoteKind::Reference => "reference",
+    }
+}
+
+fn question_status_style(status: QuestionStatus) -> (Color, Color) {
+    match status {
+        QuestionStatus::Open => (theme().question_border, theme().question_bg),
+        QuestionStatus::Answered => (theme().note_border, theme().note_bg),
+        QuestionStatus::Archived => (
+            theme().border,
+            blend_color(theme().panel, theme().border, 10),
+        ),
+    }
+}
+
+fn question_status_header(status: QuestionStatus) -> &'static str {
+    match status {
+        QuestionStatus::Open => "Open Question",
+        QuestionStatus::Answered => "Resolved Conversation",
+        QuestionStatus::Archived => "Archived Conversation",
+    }
+}
+
+fn question_status_label(status: QuestionStatus) -> &'static str {
+    match status {
+        QuestionStatus::Open => "open",
+        QuestionStatus::Answered => "resolved",
+        QuestionStatus::Archived => "archived",
+    }
+}
+
+fn question_message_style(role: QuestionMessageRole) -> (Color, Color) {
+    match role {
+        QuestionMessageRole::User => (
+            theme().border_focus,
+            blend_color(theme().panel, theme().border_focus, 12),
+        ),
+        QuestionMessageRole::Agent => (
+            theme().accent,
+            blend_color(theme().panel, theme().accent, 12),
+        ),
+    }
+}
+
+fn message_role_subtitle(role: QuestionMessageRole) -> &'static str {
+    match role {
+        QuestionMessageRole::User => "user follow-up",
+        QuestionMessageRole::Agent => "agent answer",
     }
 }
 
@@ -1090,6 +1280,34 @@ fn truncate_from_start(path: &str, max_width: usize) -> String {
     )
 }
 
+fn truncate_to_width_end(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    let target_width = max_width.saturating_sub(ellipsis_width);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > target_width {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push_str(ellipsis);
+    out
+}
+
 fn border_style(focused: bool) -> Style {
     if focused {
         Style::default().fg(theme().border_focus)
@@ -1101,7 +1319,10 @@ fn border_style(focused: bool) -> Style {
 fn draft_mode_label(draft: &PromptDraft) -> String {
     let target = match draft.target {
         DraftTarget::New => "new",
-        DraftTarget::EditNote { .. } | DraftTarget::EditQuestion { .. } => "edit",
+        DraftTarget::ContinueQuestion { .. } => "continue",
+        DraftTarget::EditNote { .. }
+        | DraftTarget::EditQuestionPrompt { .. }
+        | DraftTarget::EditQuestionMessage { .. } => "edit",
     };
     match draft.kind {
         DraftKind::Question => format!("{target} question"),
@@ -1134,8 +1355,9 @@ fn status_mode_label(app: &App) -> String {
 mod tests {
     use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, TrackedFile};
 
-    use super::{build_source_lines, status_mode_label, wrap_text};
+    use super::{build_source_lines, fit_status_segments, status_mode_label, wrap_text};
     use crate::tui::app::{App, FocusPane, InputMode};
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn wrapped_text_preserves_blank_paragraphs() {
@@ -1245,5 +1467,24 @@ mod tests {
         assert_eq!(status_mode_label(&app), "files");
         app.focus = FocusPane::Source;
         assert_eq!(status_mode_label(&app), "source");
+    }
+
+    #[test]
+    fn status_segments_fit_requested_width() {
+        let status = fit_status_segments(
+            " source ",
+            "line 128  unsaved  3 attached notes  thread open",
+            "Tab focus  j/k move  [] jump  v select  dd delete  a question  c continue  r resolve  R reload  n note",
+            48,
+        );
+        let rendered = format!(
+            "{}{}{}{}{}",
+            status.badge,
+            status.between_badge_and_meta,
+            status.meta,
+            status.between_meta_and_message,
+            status.message
+        );
+        assert!(UnicodeWidthStr::width(rendered.as_str()) <= 48);
     }
 }

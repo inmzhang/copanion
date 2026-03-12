@@ -354,6 +354,7 @@ dependencies = [
  "nucleo-matcher",
  "ratatui",
  "serde",
+ "serde_json",
  "syntect",
  "tempfile",
  "toml",

@@ -1,6 +1,6 @@
 # copanion: TUI for Code Study
 
-Study a codebase in your terminal, keep notes on exact lines, and export only the questions you still want help answering.
+Study a codebase in your terminal, keep notes on exact lines, and round-trip unresolved questions through coding agents without losing the conversation.
 
 ![demo](./demo/copanion-demo.gif)
 
@@ -12,23 +12,24 @@ Asking follow-up questions has the same problem. By the time I want help from an
 
 ## Overview
 
-`copanion` is a Rust CLI/TUI for persistent source-learning sessions.
+`copanion` is a Rust CLI/TUI for persistent source-learning packets.
 
-It opens tracked files in a terminal UI, injects note cards directly below the lines they explain, and lets you stage follow-up questions in place. Notes stay local. Only open questions are exported back to the clipboard or stdout.
+It opens tracked files in a terminal UI, injects note cards directly below the lines they explain, and lets you stage follow-up question threads in place. Notes stay local. Only open threads that still need an agent reply are exported back to the clipboard or stdout.
 
-Sessions are stored under the user data directory, usually `~/.local/share/copanion/sessions/`. The default session id is deterministic for the current directory, so reopening the same repo brings you back to the same study session unless you choose a different name with `--session`.
+Each project gets one canonical packet stored under Copanion's user data directory, usually `~/.local/share/copanion/packets/`. `copanion` discovers the project root, maps it to that packet path, and reopens the same packet every time you come back to the project.
 
-If a session has no tracked files yet, `copanion` opens directly into the fuzzy file picker so you can start from inside the TUI.
+If a packet has no tracked files yet, `copanion` opens directly into the fuzzy file picker so you can start from inside the TUI.
 
 ## Features
 
 - **Inline notes and questions** - Attach notes or follow-up questions to exact lines or selected ranges.
-- **Persistent sessions** - Save and reopen the same study session across runs.
+- **Persistent per-project packets** - Save and reopen the same packet across runs from anywhere inside the project.
 - **Fuzzy file picker** - Add tracked files from inside the TUI instead of preparing them up front.
 - **Searchable annotations** - Jump through saved notes and questions with a fuzzy search prompt.
-- **Question-only export** - Keep notes local and export only unresolved questions.
+- **Question-thread export** - Export only the open threads that still need an agent reply.
+- **Agent write-back** - Apply structured agent answers back into the packet so reopened threads show the conversation inline.
 - **Clipboard or stdout output** - Copy exports to the clipboard by default, or print them with `--stdout`.
-- **Deterministic session paths** - Use the default per-directory session id or a stable named session with `--session`.
+- **Canonical system storage** - Keep packet files in Copanion's data directory instead of scattering them through project trees.
 - **Built-in themes** - Pick a theme from the CLI or config file.
 
 ## Installation
@@ -47,6 +48,32 @@ cd copanion
 cargo install --path .
 ```
 
+### Codex Skill
+
+This repo ships one repo-local Codex skill at `.agents/skills/copanion`.
+
+#### Local to this repo
+
+If you run Codex inside this repository, no extra installation step is needed. Codex will discover the repo-local skill automatically from `.agents/skills/copanion`.
+
+If you want the same skill layout in another repository, copy or symlink the folder into that repo:
+
+```bash
+mkdir -p /path/to/other-repo/.agents/skills
+ln -sfn /path/to/copanion/.agents/skills/copanion /path/to/other-repo/.agents/skills/copanion
+```
+
+#### Global install
+
+To make the skill available in every Codex session on your machine, install it under `~/.codex/skills`:
+
+```bash
+mkdir -p ~/.codex/skills
+ln -sfn "$(pwd)/.agents/skills/copanion" ~/.codex/skills/copanion
+```
+
+Restart Codex or open a new Codex session after adding the skill so it can be discovered cleanly.
+
 ## Usage
 
 Run `copanion` in the repository you want to study:
@@ -56,28 +83,28 @@ cd /path/to/your/repo
 copanion
 ```
 
-That opens the default session for the current directory. If the session is empty, `copanion` starts in the fuzzy file picker.
+That opens the canonical packet for the current project. If the packet is empty, `copanion` starts in the fuzzy file picker.
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `-s`, `--session <SESSION>` | Stable session name. Defaults to a deterministic id derived from the current directory. |
-| `--title <TITLE>` | Title to use when creating or reopening a session. |
-| `--fresh` | Recreate the saved session while preserving tracked files when no new files are supplied. |
-| `--print-session-path` | Print the saved session path and exit. |
-| `--export` | Export open questions without opening the TUI. |
+| `--title <TITLE>` | Title to use when creating or reopening the canonical project packet. |
+| `--fresh` | Recreate the saved packet while preserving tracked files when no new files are supplied. |
+| `--print-packet-path` | Print the canonical packet path and exit. |
+| `--export` | Export only the open question threads that still need an agent reply. |
 | `--stdout` | Print exports to stdout instead of copying them to the clipboard. |
+| `--apply-agent-response <PLAN>` | Apply a JSON response plan from a file or `-` for stdin, then exit. |
 | `--theme <THEME>` | Built-in UI theme: `dark`, `light`, `one-dark`, `gruvbox-dark`, `gruvbox-light`, `catppuccin-mocha`, `catppuccin-latte`, `ayu-light`. |
-| `<FILE>...` | Attach one or more files to the current session before opening the TUI. |
+| `<FILE>...` | Attach one or more files to the current packet before opening the TUI. |
 
 Examples:
 
 ```bash
-copanion --session scheduler-tour src/main.rs src/lib.rs
-copanion --session scheduler-tour --print-session-path
-copanion --session scheduler-tour --export --stdout
-copanion --session scheduler-tour --theme gruvbox-dark
+copanion src/main.rs src/lib.rs
+copanion --print-packet-path
+copanion --export --stdout
+copanion --theme gruvbox-dark
 ```
 
 ## Configuration
@@ -135,8 +162,25 @@ Only `theme` is currently recognized. Unknown keys are ignored with a startup wa
 | Key | Action |
 |-----|--------|
 | `f` | Open the fuzzy file picker and add a tracked file |
-| `r` | Reload tracked file contents from disk |
-| `s` | Save the session |
-| `y` | Export open questions without quitting |
-| `x` | Save, export open questions, and quit |
+| `r` | Resolve the open question thread under the cursor |
+| `c` | Continue the open question thread under the cursor |
+| `o` | Reopen the resolved question thread under the cursor |
+| `R` | Reload tracked file contents from disk |
+| `s` | Save the packet |
+| `y` | Export open question threads that still need an agent reply without quitting |
+| `x` | Save, export unresolved threads, and quit |
 | `q` | Quit, with a discard guard if there are unsaved changes |
+
+## Agent Round-Trip
+
+Exported follow-ups now include:
+
+- the canonical packet path
+- stable question ids
+- the current conversation thread for each question
+
+That lets an agent answer the questions in chat and also write the same answers back into Copanion as structured conversation messages. When you reopen the TUI, you will see the agent reply cards inline under the original question and can either:
+
+- press `c` to continue the same thread with another follow-up
+- press `o` to reopen a previously resolved thread
+- press `r` to mark the thread resolved so it stops appearing in future exports
