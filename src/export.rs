@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::{Result, bail};
 
 use crate::diff::{CommitInfo, DiffSelection};
-use crate::model::{Anchor, Note, Packet, QuestionMessageRole};
+use crate::model::{Anchor, Note, Packet, Question, QuestionMessage, QuestionMessageRole};
 
 #[derive(Debug, Clone)]
 pub struct ReviewExportContext {
@@ -21,68 +22,23 @@ pub fn generate_question_export(packet: &Packet, packet_path: &Path) -> Result<S
     }
 
     let mut output = String::new();
-    output.push_str("# Copanion Follow-up\n\n");
-    output.push_str("Please answer the open question threads below.\n\n");
-    output.push_str(&format!("Packet: {}\n", packet.title));
-    output.push_str(&format!(
-        "Canonical packet path: {}\n",
-        packet_path.display()
-    ));
-    output.push_str(&format!("Project root: {}\n\n", packet.workspace_root));
-
-    output.push_str("Files in focus:\n");
-    for file in &packet.files {
-        output.push_str(&format!("- {}\n", file.path));
-    }
-    output.push('\n');
-
-    output.push_str("Existing guidance notes:\n");
-    if packet.notes.is_empty() {
-        output.push_str("- none yet\n");
-    } else {
-        for note in &packet.notes {
-            output.push_str(&format!(
-                "- [{}:{}] {} ({:?}, {:?})\n",
-                note.path, note.anchor, note.title, note.kind, note.source
-            ));
-            for line in note.body.lines() {
-                output.push_str(&format!("  {}\n", line));
-            }
-        }
-    }
-    output.push('\n');
-
-    output.push_str("Questions:\n");
-    for (index, question) in open_questions.iter().enumerate() {
-        output.push_str(&format!(
-            "{}. id={} [{}{}] {}\n",
-            index + 1,
-            question.id,
-            question.path,
-            format_anchor(question.anchor),
-            question.prompt
-        ));
-        if let Some(why) = &question.why {
-            output.push_str(&format!("   Why unclear: {}\n", why));
-        }
-        if !question.related_note_ids.is_empty() {
-            output.push_str(&format!(
-                "   Related notes: {}\n",
-                question.related_note_ids.join(", ")
-            ));
-        }
-        if !question.conversation.is_empty() {
-            output.push_str("   Conversation so far:\n");
-            for message in &question.conversation {
-                output.push_str(&format!(
-                    "   - {}: {}\n",
-                    conversation_role_label(message.role),
-                    message.body.replace('\n', "\n     ")
-                ));
-            }
-        }
-    }
-    output.push('\n');
+    write_header(
+        &mut output,
+        "# Copanion Follow-up",
+        "Please answer the open question threads below.",
+        packet,
+        packet_path,
+    );
+    write_path_section(
+        &mut output,
+        "Files in focus",
+        packet
+            .files
+            .iter()
+            .map(|file| Cow::Borrowed(file.path.as_str())),
+    );
+    write_notes_section(&mut output, &packet.notes);
+    write_questions_section(&mut output, "Questions", &open_questions, true);
 
     Ok(output)
 }
@@ -106,59 +62,32 @@ pub fn generate_review_question_export(
     }
 
     let mut output = String::new();
-    output.push_str("# Copanion Diff Review\n\n");
-    output.push_str(
-        "Please answer the review comments below. Any review notes are listed separately.\n\n",
+    write_header(
+        &mut output,
+        "# Copanion Diff Review",
+        "Please answer the review comments below. Any review notes are listed separately.",
+        packet,
+        packet_path,
     );
-    output.push_str(&format!("Packet: {}\n", packet.title));
-    output.push_str(&format!(
-        "Canonical packet path: {}\n",
-        packet_path.display()
-    ));
-    output.push_str(&format!("Project root: {}\n", packet.workspace_root));
     output.push_str(&format!(
         "Review scope: {}\n\n",
         review_scope_label(&review.selection)
     ));
 
-    output.push_str("Selected revisions:\n");
-    for entry in &review.review_entries {
-        if entry.is_working_tree() {
-            output.push_str("- Uncommitted changes\n");
-        } else {
-            output.push_str(&format!("- {} {}\n", entry.short_id, entry.summary));
-        }
-    }
-    output.push('\n');
-
-    output.push_str("Files under review:\n");
-    for path in &review.changed_paths {
-        output.push_str(&format!("- {path}\n"));
-    }
-    output.push('\n');
-
-    output.push_str("Review comments:\n");
-    for (index, question) in open_questions.iter().enumerate() {
-        output.push_str(&format!(
-            "{}. id={} [{}{}] {}\n",
-            index + 1,
-            question.id,
-            question.path,
-            format_anchor(question.anchor),
-            question.prompt
-        ));
-        if !question.conversation.is_empty() {
-            output.push_str("   Conversation so far:\n");
-            for message in &question.conversation {
-                output.push_str(&format!(
-                    "   - {}: {}\n",
-                    conversation_role_label(message.role),
-                    message.body.replace('\n', "\n     ")
-                ));
-            }
-        }
-    }
-    output.push('\n');
+    write_path_section(
+        &mut output,
+        "Selected revisions",
+        review.review_entries.iter().map(review_entry_label),
+    );
+    write_path_section(
+        &mut output,
+        "Files under review",
+        review
+            .changed_paths
+            .iter()
+            .map(|path| Cow::Borrowed(path.as_str())),
+    );
+    write_questions_section(&mut output, "Review comments", &open_questions, false);
 
     Ok(output)
 }
@@ -186,6 +115,129 @@ fn review_scope_label(selection: &DiffSelection) -> &'static str {
         DiffSelection::WorkingTree => "working tree",
         DiffSelection::CommitRange(_) => "selected commits",
         DiffSelection::WorkingTreeAndCommits(_) => "working tree plus selected commits",
+    }
+}
+
+fn write_header(
+    output: &mut String,
+    heading: &str,
+    intro: &str,
+    packet: &Packet,
+    packet_path: &Path,
+) {
+    output.push_str(heading);
+    output.push_str("\n\n");
+    output.push_str(intro);
+    output.push_str("\n\n");
+    output.push_str(&format!("Packet: {}\n", packet.title));
+    output.push_str(&format!(
+        "Canonical packet path: {}\n",
+        packet_path.display()
+    ));
+    output.push_str(&format!("Project root: {}\n\n", packet.workspace_root));
+}
+
+fn write_path_section<'a>(
+    output: &mut String,
+    title: &str,
+    items: impl IntoIterator<Item = Cow<'a, str>>,
+) {
+    output.push_str(title);
+    output.push_str(":\n");
+    let mut saw_item = false;
+    for item in items {
+        saw_item = true;
+        output.push_str("- ");
+        output.push_str(&item);
+        output.push('\n');
+    }
+    if !saw_item {
+        output.push_str("- none\n");
+    }
+    output.push('\n');
+}
+
+fn write_notes_section(output: &mut String, notes: &[Note]) {
+    output.push_str("Existing guidance notes:\n");
+    if notes.is_empty() {
+        output.push_str("- none yet\n\n");
+        return;
+    }
+
+    for note in notes {
+        output.push_str(&format!(
+            "- [{}:{}] {} ({:?}, {:?})\n",
+            note.path, note.anchor, note.title, note.kind, note.source
+        ));
+        for line in note.body.lines() {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push('\n');
+}
+
+fn write_questions_section(
+    output: &mut String,
+    title: &str,
+    questions: &[&Question],
+    include_note_context: bool,
+) {
+    output.push_str(title);
+    output.push_str(":\n");
+    for (index, question) in questions.iter().enumerate() {
+        write_question(output, index + 1, question, include_note_context);
+    }
+    output.push('\n');
+}
+
+fn write_question(
+    output: &mut String,
+    index: usize,
+    question: &Question,
+    include_note_context: bool,
+) {
+    output.push_str(&format!(
+        "{index}. id={} [{}{}] {}\n",
+        question.id,
+        question.path,
+        format_anchor(question.anchor),
+        question.prompt
+    ));
+    if include_note_context {
+        if let Some(why) = &question.why {
+            output.push_str(&format!("   Why unclear: {why}\n"));
+        }
+        if !question.related_note_ids.is_empty() {
+            output.push_str(&format!(
+                "   Related notes: {}\n",
+                question.related_note_ids.join(", ")
+            ));
+        }
+    }
+    write_conversation(output, &question.conversation);
+}
+
+fn write_conversation(output: &mut String, messages: &[QuestionMessage]) {
+    if messages.is_empty() {
+        return;
+    }
+    output.push_str("   Conversation so far:\n");
+    for message in messages {
+        output.push_str(&format!(
+            "   - {}: {}\n",
+            conversation_role_label(message.role),
+            message.body.replace('\n', "\n     ")
+        ));
+    }
+}
+
+fn review_entry_label(entry: &CommitInfo) -> Cow<'_, str> {
+    if entry.is_working_tree() {
+        Cow::Borrowed("Uncommitted changes")
+    } else {
+        Cow::Owned(format!("{} {}", entry.short_id, entry.summary))
     }
 }
 

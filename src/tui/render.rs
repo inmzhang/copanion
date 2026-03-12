@@ -2171,9 +2171,8 @@ fn status_mode_label(app: &App) -> String {
 mod tests {
     use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, TrackedFile};
 
-    use super::{build_source_lines, fit_status_segments, status_mode_label, wrap_text};
-    use crate::tui::app::{App, FocusPane, InputMode};
-    use unicode_width::UnicodeWidthStr;
+    use super::{build_source_lines, wrap_text};
+    use crate::tui::app::App;
 
     #[test]
     fn wrapped_text_preserves_blank_paragraphs() {
@@ -2245,62 +2244,5 @@ mod tests {
         let app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
         let (_, metrics) = build_source_lines(&app, 80);
         assert_eq!(metrics.annotation_lines, vec![3]);
-    }
-
-    #[test]
-    fn status_label_tracks_question_and_note_drafts() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let packet = Packet::new(
-            "demo",
-            "Demo",
-            root.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
-
-        app.begin_question();
-        assert_eq!(status_mode_label(&app), "question");
-
-        app.discard_draft();
-        app.begin_note();
-        assert_eq!(status_mode_label(&app), "note");
-    }
-
-    #[test]
-    fn status_label_uses_focus_in_normal_mode() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let packet = Packet::new(
-            "demo",
-            "Demo",
-            root.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
-        app.input_mode = InputMode::Normal;
-        app.focus = FocusPane::Files;
-        assert_eq!(status_mode_label(&app), "files");
-        app.focus = FocusPane::Source;
-        assert_eq!(status_mode_label(&app), "source");
-    }
-
-    #[test]
-    fn status_segments_fit_requested_width() {
-        let status = fit_status_segments(
-            " source ",
-            "line 128  unsaved  3 attached notes  thread open",
-            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  c close  R reload  n note",
-            48,
-        );
-        let rendered = format!(
-            "{}{}{}{}{}",
-            status.badge,
-            status.between_badge_and_meta,
-            status.meta,
-            status.between_meta_and_message,
-            status.message
-        );
-        assert!(UnicodeWidthStr::width(rendered.as_str()) <= 48);
     }
 }

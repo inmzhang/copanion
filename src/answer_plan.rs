@@ -88,6 +88,12 @@ pub fn apply_plan(
                 answer.question_id
             ));
         }
+        if !question.needs_agent_reply() {
+            return Err(anyhow!(
+                "question {} is not waiting for an agent reply",
+                answer.question_id
+            ));
+        }
         question.add_message(QuestionMessageRole::Agent, body.to_string());
         summary.answered_questions += 1;
     }
@@ -95,6 +101,16 @@ pub fn apply_plan(
     for note in plan.notes {
         if note.start_line == 0 {
             return Err(anyhow!("note anchors must start at line 1 or later"));
+        }
+        if note
+            .end_line
+            .is_some_and(|end_line| end_line < note.start_line)
+        {
+            return Err(anyhow!(
+                "note anchors must not end before they start ({}..{:?})",
+                note.start_line,
+                note.end_line
+            ));
         }
         let path = storage::normalize_repo_path(Path::new(&note.path), repo_root);
         packet.ensure_file(path.clone());
@@ -168,5 +184,59 @@ mod tests {
             QuestionMessageRole::Agent
         );
         assert_eq!(packet.notes.len(), 1);
+    }
+
+    #[test]
+    fn apply_plan_rejects_answers_for_threads_not_waiting_for_reply() {
+        let mut packet = Packet::new("demo", "Demo", "/repo", vec![]);
+        let mut question = Question::new("src/main.rs", None, "Why is this empty?", None, vec![]);
+        question.add_message(QuestionMessageRole::Agent, "Already answered.");
+        let question_id = question.id.clone();
+        packet.questions.push(question);
+
+        let error = apply_plan(
+            &mut packet,
+            Path::new("/repo"),
+            AgentResponsePlan {
+                answers: vec![AgentAnswer {
+                    question_id,
+                    answer: "Another answer".to_string(),
+                }],
+                notes: vec![],
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("is not waiting for an agent reply")
+        );
+    }
+
+    #[test]
+    fn apply_plan_rejects_inverted_note_ranges() {
+        let mut packet = Packet::new("demo", "Demo", "/repo", vec![]);
+
+        let error = apply_plan(
+            &mut packet,
+            Path::new("/repo"),
+            AgentResponsePlan {
+                answers: vec![],
+                notes: vec![AgentNote {
+                    path: "src/main.rs".to_string(),
+                    start_line: 5,
+                    end_line: Some(3),
+                    kind: None,
+                    title: "broken".to_string(),
+                    body: "bad range".to_string(),
+                    tags: vec![],
+                    author: None,
+                }],
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must not end before they start"));
     }
 }

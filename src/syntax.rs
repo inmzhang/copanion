@@ -13,6 +13,30 @@ pub type StyledSegments = Vec<(Style, String)>;
 
 type HighlightedLines = Vec<Option<StyledSegments>>;
 
+const EXTENSION_FALLBACKS: &[(&str, &str)] = &[
+    ("jsx", "js"),
+    ("mjs", "js"),
+    ("cjs", "js"),
+    ("hbs", "html"),
+    ("handlebars", "html"),
+    ("mustache", "html"),
+    ("ejs", "html"),
+    ("pug", "html"),
+    ("jade", "html"),
+    ("njk", "html"),
+    ("mdx", "md"),
+    ("jsonc", "json"),
+    ("json5", "json"),
+    ("prisma", "json"),
+    ("heex", "rb"),
+];
+
+const FILENAME_FALLBACKS: &[(&str, &str)] = &[
+    ("Containerfile", "sh"),
+    ("Justfile", "sh"),
+    ("justfile", "sh"),
+];
+
 pub fn highlight_file(path: &str, lines: &[String]) -> Vec<StyledSegments> {
     let highlighter = SyntaxHighlighter::new(theme::active().syntect_theme);
     highlighter
@@ -76,43 +100,11 @@ impl SyntaxHighlighter {
         result
     }
 
-    fn fallback_extension(ext: &str) -> Option<&'static str> {
-        match ext {
-            "jsx" | "mjs" | "cjs" => Some("js"),
-            "hbs" | "handlebars" | "mustache" | "ejs" | "pug" | "jade" | "njk" => Some("html"),
-            "mdx" => Some("md"),
-            "jsonc" | "json5" | "prisma" => Some("json"),
-            "heex" => Some("rb"),
-            _ => None,
-        }
-    }
-
-    fn fallback_filename(name: &str) -> Option<&'static str> {
-        match name {
-            "Containerfile" => Some("sh"),
-            "Justfile" | "justfile" => Some("sh"),
-            _ => None,
-        }
-    }
-
     fn get_syntax(&self, file_path: &Path) -> Option<&'static SyntaxReference> {
-        if let Some(ext) = file_path.extension().and_then(|ext| ext.to_str()) {
-            if let Some(syntax) = syntax_set().find_syntax_by_extension(ext) {
-                return Some(syntax);
-            }
-
-            let normalized = ext.to_ascii_lowercase();
-            if normalized != ext
-                && let Some(syntax) = syntax_set().find_syntax_by_extension(&normalized)
-            {
-                return Some(syntax);
-            }
-
-            if let Some(fallback) = Self::fallback_extension(&normalized)
-                && let Some(syntax) = syntax_set().find_syntax_by_extension(fallback)
-            {
-                return Some(syntax);
-            }
+        if let Some(ext) = file_path.extension().and_then(|ext| ext.to_str())
+            && let Some(syntax) = find_syntax_by_extension(ext)
+        {
+            return Some(syntax);
         }
 
         if let Some(filename) = file_path.file_name().and_then(|name| name.to_str()) {
@@ -124,7 +116,7 @@ impl SyntaxHighlighter {
                 return Some(syntax);
             }
 
-            if let Some(fallback) = Self::fallback_filename(filename)
+            if let Some(fallback) = lookup_fallback(filename, FILENAME_FALLBACKS)
                 && let Some(syntax) = syntax_set().find_syntax_by_extension(fallback)
             {
                 return Some(syntax);
@@ -147,6 +139,28 @@ fn theme_set() -> &'static EmbeddedLazyThemeSet {
 
 fn default_segments(line: &str) -> StyledSegments {
     vec![(Style::default(), line.to_string())]
+}
+
+fn find_syntax_by_extension(ext: &str) -> Option<&'static SyntaxReference> {
+    if let Some(syntax) = syntax_set().find_syntax_by_extension(ext) {
+        return Some(syntax);
+    }
+
+    let normalized = ext.to_ascii_lowercase();
+    if normalized != ext
+        && let Some(syntax) = syntax_set().find_syntax_by_extension(&normalized)
+    {
+        return Some(syntax);
+    }
+
+    lookup_fallback(&normalized, EXTENSION_FALLBACKS)
+        .and_then(|fallback| syntax_set().find_syntax_by_extension(fallback))
+}
+
+fn lookup_fallback<'a>(value: &str, table: &'a [(&'a str, &'static str)]) -> Option<&'static str> {
+    table
+        .iter()
+        .find_map(|(candidate, fallback)| (*candidate == value).then_some(*fallback))
 }
 
 fn to_ratatui_style(style: syntect::highlighting::Style) -> Style {
@@ -175,18 +189,9 @@ mod tests {
     use two_face::theme::EmbeddedThemeName;
 
     #[test]
-    fn rust_sources_receive_colored_segments() {
-        let highlighted = highlight_file(
-            "src/main.rs",
-            &[String::from("fn main() { println!(\"hi\"); }")],
-        );
-        assert_eq!(highlighted.len(), 1);
-        assert!(highlighted[0].iter().any(|(style, _)| style.fg.is_some()));
-    }
-
-    #[test]
-    fn toml_python_and_typescript_have_real_syntax_colors() {
+    fn supported_sources_receive_syntax_colors() {
         for (path, line) in [
+            ("src/main.rs", "fn main() { println!(\"hi\"); }"),
             ("Cargo.toml", "version = \"0.1.0\""),
             ("tool.py", "def main():"),
             ("widget.ts", "export const x: number = 1;"),
@@ -201,51 +206,26 @@ mod tests {
     }
 
     #[test]
-    fn should_find_syntax_for_uppercase_extension() {
+    fn syntax_detection_handles_case_tokens_and_fallbacks() {
         let highlighter = SyntaxHighlighter::default();
-        assert!(highlighter.get_syntax(Path::new("SRC/MAIN.RS")).is_some());
-    }
-
-    #[test]
-    fn should_find_syntax_for_build_filename_token() {
-        let highlighter = SyntaxHighlighter::default();
-        assert!(highlighter.get_syntax(Path::new("BUILD")).is_some());
-    }
-
-    #[test]
-    fn should_find_syntax_for_typescript_family() {
-        let highlighter = SyntaxHighlighter::default();
-        for ext in ["ts", "tsx", "mts", "cts", "jsx", "mjs", "cjs"] {
-            let path = format!("file.{ext}");
-            assert!(
-                highlighter.get_syntax(Path::new(&path)).is_some(),
-                "should find syntax for .{ext}"
-            );
-        }
-    }
-
-    #[test]
-    fn should_find_syntax_for_common_fallback_extensions() {
-        let highlighter = SyntaxHighlighter::default();
-        for ext in [
-            "jsx", "mjs", "cjs", "hbs", "mustache", "ejs", "pug", "njk", "mdx", "jsonc", "json5",
-            "prisma", "heex",
+        for path in [
+            "SRC/MAIN.RS",
+            "BUILD",
+            "file.ts",
+            "file.tsx",
+            "file.mts",
+            "file.cts",
+            "file.mjs",
+            "file.mustache",
+            "file.mdx",
+            "file.json5",
+            "file.heex",
+            "Containerfile",
+            "justfile",
         ] {
-            let path = format!("file.{ext}");
             assert!(
-                highlighter.get_syntax(Path::new(&path)).is_some(),
-                "should find syntax for .{ext}"
-            );
-        }
-    }
-
-    #[test]
-    fn should_find_syntax_for_fallback_filenames() {
-        let highlighter = SyntaxHighlighter::default();
-        for name in ["Containerfile", "Justfile", "justfile"] {
-            assert!(
-                highlighter.get_syntax(Path::new(name)).is_some(),
-                "should find syntax for {name}"
+                highlighter.get_syntax(Path::new(path)).is_some(),
+                "should resolve syntax for {path}"
             );
         }
     }

@@ -103,7 +103,9 @@ pub fn run() -> Result<()> {
             }
         })
         .collect::<Vec<_>>();
-    let merged = storage::merge_files(&mut packet, &project_root, &resolved_files);
+    let merged = resolved_files
+        .iter()
+        .any(|file| packet.ensure_file(storage::normalize_repo_path(file, &project_root)));
     if merged {
         packet.touch();
     }

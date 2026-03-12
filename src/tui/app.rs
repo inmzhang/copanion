@@ -346,9 +346,7 @@ impl App {
                 context_idx,
             } => {
                 let file = browser.files.get(*file_idx)?;
-                if file.new_path.is_none() {
-                    return None;
-                }
+                file.new_path.as_ref()?;
                 let line = browser
                     .expanded_content
                     .get(gap_id)?
@@ -362,9 +360,7 @@ impl App {
                 line_idx,
             } => {
                 let file = browser.files.get(*file_idx)?;
-                if file.new_path.is_none() {
-                    return None;
-                }
+                file.new_path.as_ref()?;
                 let line = file
                     .hunks
                     .get(*hunk_idx)?
@@ -428,6 +424,27 @@ impl App {
             .as_mut()
             .expect("search buffer requested outside of search mode")
             .query
+    }
+
+    fn has_annotation_context(&self) -> bool {
+        if self.is_diff_mode() {
+            !self.diff_files().is_empty()
+        } else {
+            !self.files.is_empty()
+        }
+    }
+
+    fn clear_visual_selection_state(&mut self) {
+        self.visual_anchor = None;
+        if let Some(browser) = &mut self.diff_browser {
+            browser.visual_anchor_row = None;
+        }
+    }
+
+    fn current_annotation_line(&self) -> usize {
+        self.current_annotation_target()
+            .map(|(_, line)| line)
+            .unwrap_or(self.cursor_line)
     }
 
     pub fn toggle_focus(&mut self) {
@@ -582,12 +599,7 @@ impl App {
     }
 
     pub fn begin_question_follow_up(&mut self) {
-        let has_context = if self.is_diff_mode() {
-            !self.diff_files().is_empty()
-        } else {
-            !self.files.is_empty()
-        };
-        if !has_context {
+        if !self.has_annotation_context() {
             self.message = Some(if self.is_diff_mode() {
                 "add a tracked file before continuing a comment".to_string()
             } else {
@@ -603,24 +615,23 @@ impl App {
             });
             return;
         };
-        let question = &self.packet.questions[index];
-        let current_line = self
-            .current_annotation_target()
-            .map(|(_, line)| line)
-            .unwrap_or(self.cursor_line);
+        let (path, related_note_ids, anchor) = {
+            let question = &self.packet.questions[index];
+            (
+                question.path.clone(),
+                question.related_note_ids.clone(),
+                question.anchor,
+            )
+        };
+        let current_line = self.current_annotation_line();
         self.discard_guard = false;
-        self.visual_anchor = None;
-        if let Some(browser) = &mut self.diff_browser {
-            browser.visual_anchor_row = None;
-        }
+        self.clear_visual_selection_state();
         self.draft = Some(PromptDraft {
             kind: DraftKind::Question,
             target: DraftTarget::ContinueQuestion { index },
-            path: question.path.clone(),
-            anchor: question
-                .anchor
-                .unwrap_or_else(|| Anchor::new(current_line, None)),
-            related_note_ids: question.related_note_ids.clone(),
+            path,
+            anchor: anchor.unwrap_or_else(|| Anchor::new(current_line, None)),
+            related_note_ids,
             buffer: TextBuffer::default(),
             original_text: String::new(),
         });
@@ -704,12 +715,7 @@ impl App {
     }
 
     pub fn begin_edit_current_annotation(&mut self, prefer_note: bool) {
-        let has_context = if self.is_diff_mode() {
-            !self.diff_files().is_empty()
-        } else {
-            !self.files.is_empty()
-        };
-        if !has_context {
+        if !self.has_annotation_context() {
             self.message = Some("add a tracked file before editing annotations".to_string());
             return;
         }
@@ -733,10 +739,7 @@ impl App {
             });
             return;
         };
-        let current_line = self
-            .current_annotation_target()
-            .map(|(_, line)| line)
-            .unwrap_or(self.cursor_line);
+        let current_line = self.current_annotation_line();
 
         let draft = match target {
             DraftTarget::EditNote { index } => {
@@ -790,10 +793,7 @@ impl App {
         };
 
         self.draft = Some(draft);
-        self.visual_anchor = None;
-        if let Some(browser) = &mut self.diff_browser {
-            browser.visual_anchor_row = None;
-        }
+        self.clear_visual_selection_state();
         self.input_mode = InputMode::Draft;
         self.message = Some(
             if self.is_diff_mode() {
@@ -806,12 +806,7 @@ impl App {
     }
 
     fn begin_new_draft(&mut self, kind: DraftKind) {
-        let has_context = if self.is_diff_mode() {
-            !self.diff_files().is_empty()
-        } else {
-            !self.files.is_empty()
-        };
-        if !has_context {
+        if !self.has_annotation_context() {
             self.message = Some("add a tracked file before creating annotations".to_string());
             return;
         }
@@ -828,10 +823,7 @@ impl App {
         } else {
             Vec::new()
         };
-        self.visual_anchor = None;
-        if let Some(browser) = &mut self.diff_browser {
-            browser.visual_anchor_row = None;
-        }
+        self.clear_visual_selection_state();
         self.draft = Some(PromptDraft {
             kind,
             target: DraftTarget::New,
@@ -1174,31 +1166,22 @@ impl App {
             return Ok(());
         }
 
+        self.apply_draft(&draft, text);
+
+        self.packet.touch();
+        self.dirty = true;
+        self.input_mode = InputMode::Normal;
+        self.message = Some(
+            self.draft_commit_message(draft.kind, draft.target)
+                .to_string(),
+        );
+        Ok(())
+    }
+
+    fn apply_draft(&mut self, draft: &PromptDraft, text: String) {
         self.packet.ensure_file(draft.path.clone());
         match draft.target {
-            DraftTarget::New => match draft.kind {
-                DraftKind::Question => {
-                    self.packet.questions.push(Question::new(
-                        draft.path.clone(),
-                        Some(draft.anchor),
-                        text,
-                        None,
-                        draft.related_note_ids,
-                    ));
-                }
-                DraftKind::Note => {
-                    self.packet.notes.push(Note::new(
-                        draft.path.clone(),
-                        draft.anchor,
-                        NoteKind::Overview,
-                        note_title_from_text(&text),
-                        text,
-                        Vec::new(),
-                        None,
-                        NoteSource::Human,
-                    ));
-                }
-            },
+            DraftTarget::New => self.apply_new_draft(draft, text),
             DraftTarget::ContinueQuestion { index } => {
                 if let Some(question) = self.packet.questions.get_mut(index) {
                     question.add_message(QuestionMessageRole::User, text);
@@ -1220,8 +1203,7 @@ impl App {
                     question.anchor = Some(draft.anchor);
                     question.prompt = text;
                     question.why = None;
-                    question.related_note_ids = draft.related_note_ids;
-                    question.conversation.clear();
+                    question.related_note_ids = draft.related_note_ids.clone();
                     question.status = QuestionStatus::Open;
                     question.updated_at = Utc::now();
                 }
@@ -1233,79 +1215,73 @@ impl App {
                 if let Some(question) = self.packet.questions.get_mut(question_index) {
                     question.path = draft.path.clone();
                     question.anchor = Some(draft.anchor);
-                    question.related_note_ids = draft.related_note_ids;
+                    question.related_note_ids = draft.related_note_ids.clone();
                     if let Some(message) = question.conversation.get_mut(message_index) {
                         message.body = text;
                         message.updated_at = Utc::now();
                     }
-                    question.conversation.truncate(message_index + 1);
                     question.status = QuestionStatus::Open;
                     question.updated_at = Utc::now();
                 }
             }
         }
+    }
 
-        self.packet.touch();
-        self.dirty = true;
-        self.input_mode = InputMode::Normal;
-        self.message = Some(
-            match (self.is_diff_mode(), draft.kind, draft.target) {
-                (true, DraftKind::Question, DraftTarget::New) => {
-                    "comment staged; press s to save or y/x to export the review"
-                }
-                (true, DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
-                    "comment reply staged; press s to save or y/x to export the review"
-                }
-                (true, DraftKind::Note, DraftTarget::New) => {
-                    "review note staged; press s to save or keep reading"
-                }
-                (
-                    true,
-                    DraftKind::Question,
-                    DraftTarget::EditQuestionPrompt { .. }
-                    | DraftTarget::EditQuestionMessage { .. },
-                ) => "comment updated; press s to save or y/x to export the review",
-                (true, DraftKind::Note, DraftTarget::EditNote { .. }) => {
-                    "review note updated; press s to save or keep reading"
-                }
-                (true, DraftKind::Question, DraftTarget::EditNote { .. })
-                | (
-                    true,
-                    DraftKind::Note,
-                    DraftTarget::EditQuestionPrompt { .. }
-                    | DraftTarget::EditQuestionMessage { .. }
-                    | DraftTarget::ContinueQuestion { .. },
-                ) => "review annotation updated",
-                (false, DraftKind::Question, DraftTarget::New) => {
-                    "question staged; press s to save or x to save and export"
-                }
-                (false, DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
-                    "follow-up staged; press s to save or x to save and export"
-                }
-                (false, DraftKind::Note, DraftTarget::New) => {
-                    "note staged; press s to save or keep reading"
-                }
-                (
-                    false,
-                    DraftKind::Question,
-                    DraftTarget::EditQuestionPrompt { .. }
-                    | DraftTarget::EditQuestionMessage { .. },
-                ) => "question updated; press s to save or x to save and export",
-                (false, DraftKind::Note, DraftTarget::EditNote { .. }) => {
-                    "note updated; press s to save or keep reading"
-                }
-                (false, DraftKind::Question, DraftTarget::EditNote { .. })
-                | (
-                    false,
-                    DraftKind::Note,
-                    DraftTarget::EditQuestionPrompt { .. }
-                    | DraftTarget::EditQuestionMessage { .. }
-                    | DraftTarget::ContinueQuestion { .. },
-                ) => "annotation updated",
+    fn apply_new_draft(&mut self, draft: &PromptDraft, text: String) {
+        match draft.kind {
+            DraftKind::Question => {
+                self.packet.questions.push(Question::new(
+                    draft.path.clone(),
+                    Some(draft.anchor),
+                    text,
+                    None,
+                    draft.related_note_ids.clone(),
+                ));
             }
-            .to_string(),
-        );
-        Ok(())
+            DraftKind::Note => {
+                self.packet.notes.push(Note::new(
+                    draft.path.clone(),
+                    draft.anchor,
+                    NoteKind::Overview,
+                    note_title_from_text(&text),
+                    text,
+                    Vec::new(),
+                    None,
+                    NoteSource::Human,
+                ));
+            }
+        }
+    }
+
+    fn draft_commit_message(&self, kind: DraftKind, target: DraftTarget) -> &'static str {
+        match (self.is_diff_mode(), kind, target) {
+            (true, DraftKind::Question, DraftTarget::New) => {
+                "comment staged; press s to save or y/x to export the review"
+            }
+            (true, DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
+                "comment reply staged; press s to save or y/x to export the review"
+            }
+            (true, DraftKind::Question, _) => {
+                "comment updated; press s to save or y/x to export the review"
+            }
+            (true, DraftKind::Note, DraftTarget::New) => {
+                "review note staged; press s to save or keep reading"
+            }
+            (true, DraftKind::Note, _) => "review note updated; press s to save or keep reading",
+            (false, DraftKind::Question, DraftTarget::New) => {
+                "question staged; press s to save or x to save and export"
+            }
+            (false, DraftKind::Question, DraftTarget::ContinueQuestion { .. }) => {
+                "follow-up staged; press s to save or x to save and export"
+            }
+            (false, DraftKind::Question, _) => {
+                "question updated; press s to save or x to save and export"
+            }
+            (false, DraftKind::Note, DraftTarget::New) => {
+                "note staged; press s to save or keep reading"
+            }
+            (false, DraftKind::Note, _) => "note updated; press s to save or keep reading",
+        }
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -1536,22 +1512,20 @@ impl App {
             } else {
                 format!("deleted latest follow-up from question {question_id}")
             }
+        } else if diff_mode {
+            format!(
+                "deleted latest reply from comment thread {} and {} dependent repl{}",
+                question_id,
+                removed_count - 1,
+                if removed_count == 2 { "y" } else { "ies" }
+            )
         } else {
-            if diff_mode {
-                format!(
-                    "deleted latest reply from comment thread {} and {} dependent repl{}",
-                    question_id,
-                    removed_count - 1,
-                    if removed_count == 2 { "y" } else { "ies" }
-                )
-            } else {
-                format!(
-                    "deleted latest follow-up from question {} and {} dependent repl{}",
-                    question_id,
-                    removed_count - 1,
-                    if removed_count == 2 { "y" } else { "ies" }
-                )
-            }
+            format!(
+                "deleted latest follow-up from question {} and {} dependent repl{}",
+                question_id,
+                removed_count - 1,
+                if removed_count == 2 { "y" } else { "ies" }
+            )
         }
     }
 
@@ -2121,7 +2095,7 @@ impl App {
             .enumerate()
             .filter(|(_, row)| **row <= browser.cursor_row)
             .map(|(index, _)| index)
-            .last()
+            .next_back()
             .unwrap_or(0);
     }
 
@@ -2577,8 +2551,10 @@ fn restore_commit_selector_state(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use chrono::Utc;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
     use crate::diff::CommitInfo;
     use crate::model::{Note, NoteKind, NoteSource, Packet, Question, QuestionStatus, TrackedFile};
@@ -2588,6 +2564,44 @@ mod tests {
         restore_commit_selector_state,
     };
     use crate::model::Anchor;
+
+    fn write_workspace_file(root: &Path, relative_path: &str, contents: &str) {
+        let absolute = root.join(relative_path);
+        if let Some(parent) = absolute.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(absolute, contents).unwrap();
+    }
+
+    fn source_app(
+        files: &[(&str, &str)],
+        configure_packet: impl FnOnce(&mut Packet),
+    ) -> (TempDir, App) {
+        let temp = tempdir().unwrap();
+        let tracked_files = files
+            .iter()
+            .map(|(path, contents)| {
+                write_workspace_file(temp.path(), path, contents);
+                TrackedFile::new(*path)
+            })
+            .collect();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            tracked_files,
+        );
+        configure_packet(&mut packet);
+        let app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        (temp, app)
+    }
+
+    fn single_file_app(
+        contents: &str,
+        configure_packet: impl FnOnce(&mut Packet),
+    ) -> (TempDir, App) {
+        source_app(&[("main.rs", contents)], configure_packet)
+    }
 
     fn fake_commit(id: &str) -> CommitInfo {
         CommitInfo {
@@ -2615,25 +2629,18 @@ mod tests {
 
     #[test]
     fn app_stages_questions_against_current_line() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        packet.notes.push(Note::new(
-            "main.rs",
-            Anchor::new(1, None),
-            NoteKind::Overview,
-            "Entry point",
-            "This function starts the binary.",
-            vec![],
-            None,
-            NoteSource::Agent,
-        ));
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |packet| {
+            packet.notes.push(Note::new(
+                "main.rs",
+                Anchor::new(1, None),
+                NoteKind::Overview,
+                "Entry point",
+                "This function starts the binary.",
+                vec![],
+                None,
+                NoteSource::Agent,
+            ));
+        });
         app.focus = FocusPane::Source;
         app.begin_question();
         let prompt = app.active_draft_buffer_mut();
@@ -2647,15 +2654,7 @@ mod tests {
 
     #[test]
     fn can_start_note_draft() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |_| {});
         app.begin_note();
         assert_eq!(app.input_mode, InputMode::Draft);
         assert_eq!(
@@ -2670,15 +2669,7 @@ mod tests {
 
     #[test]
     fn esc_requests_save_confirmation_for_dirty_draft() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |_| {});
         app.begin_question();
         let buffer = app.active_draft_buffer_mut();
         buffer.text = "What is this?".to_string();
@@ -2689,22 +2680,15 @@ mod tests {
 
     #[test]
     fn can_reopen_and_edit_existing_question() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        packet.questions.push(Question::new(
-            "main.rs",
-            Some(Anchor::new(1, None)),
-            "Original question?",
-            None,
-            Vec::new(),
-        ));
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |packet| {
+            packet.questions.push(Question::new(
+                "main.rs",
+                Some(Anchor::new(1, None)),
+                "Original question?",
+                None,
+                Vec::new(),
+            ));
+        });
         app.begin_edit_current_annotation(false);
         let buffer = app.active_draft_buffer_mut();
         buffer.text = "Updated question?".to_string();
@@ -2714,33 +2698,56 @@ mod tests {
     }
 
     #[test]
-    fn delete_annotation_prefers_question_threads_before_notes() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
+    fn editing_prompt_preserves_existing_conversation() {
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(1, None)),
+                "Original question?",
+                None,
+                Vec::new(),
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "This already has an answer.",
+            );
+            packet.questions.push(question);
+        });
+        app.begin_edit_current_annotation(false);
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "Updated question?".to_string();
+        buffer.cursor = buffer.text.len();
+        app.commit_draft().unwrap();
+
+        assert_eq!(app.packet.questions[0].prompt, "Updated question?");
+        assert_eq!(app.packet.questions[0].conversation.len(), 1);
+        assert_eq!(
+            app.packet.questions[0].conversation[0].body,
+            "This already has an answer."
         );
-        packet.notes.push(Note::new(
-            "main.rs",
-            Anchor::new(1, None),
-            NoteKind::Overview,
-            "Entry point",
-            "This function starts the binary.",
-            vec![],
-            None,
-            NoteSource::Agent,
-        ));
-        packet.questions.push(Question::new(
-            "main.rs",
-            Some(Anchor::new(1, None)),
-            "Why is main empty?",
-            None,
-            vec![],
-        ));
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+    }
+
+    #[test]
+    fn delete_annotation_prefers_question_threads_before_notes() {
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |packet| {
+            packet.notes.push(Note::new(
+                "main.rs",
+                Anchor::new(1, None),
+                NoteKind::Overview,
+                "Entry point",
+                "This function starts the binary.",
+                vec![],
+                None,
+                NoteSource::Agent,
+            ));
+            packet.questions.push(Question::new(
+                "main.rs",
+                Some(Anchor::new(1, None)),
+                "Why is main empty?",
+                None,
+                vec![],
+            ));
+        });
         assert!(app.delete_annotation_at_cursor());
         assert!(app.packet.questions.is_empty());
         assert_eq!(app.packet.notes.len(), 1);
@@ -2750,37 +2757,31 @@ mod tests {
 
     #[test]
     fn deleting_current_file_purges_related_state() {
-        let temp = tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("src")).unwrap();
-        std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(temp.path().join("src/lib.rs"), "pub fn helper() {}\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![
-                TrackedFile::new("src/main.rs"),
-                TrackedFile::new("src/lib.rs"),
+        let (_temp, mut app) = source_app(
+            &[
+                ("src/main.rs", "fn main() {}\n"),
+                ("src/lib.rs", "pub fn helper() {}\n"),
             ],
+            |packet| {
+                packet.notes.push(Note::new(
+                    "src/main.rs",
+                    Anchor::new(1, None),
+                    NoteKind::Overview,
+                    "Entry point",
+                    "This function starts the binary.",
+                    vec![],
+                    None,
+                    NoteSource::Agent,
+                ));
+                packet.questions.push(Question::new(
+                    "src/main.rs",
+                    Some(Anchor::new(1, None)),
+                    "Why is main empty?",
+                    None,
+                    vec![],
+                ));
+            },
         );
-        packet.notes.push(Note::new(
-            "src/main.rs",
-            Anchor::new(1, None),
-            NoteKind::Overview,
-            "Entry point",
-            "This function starts the binary.",
-            vec![],
-            None,
-            NoteSource::Agent,
-        ));
-        packet.questions.push(Question::new(
-            "src/main.rs",
-            Some(Anchor::new(1, None)),
-            "Why is main empty?",
-            None,
-            vec![],
-        ));
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
         assert!(app.delete_current_file());
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.current_path(), "src/lib.rs");
@@ -2791,8 +2792,7 @@ mod tests {
     #[test]
     fn empty_session_opens_file_picker_and_adds_file() {
         let temp = tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("src")).unwrap();
-        std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        write_workspace_file(temp.path(), "src/main.rs", "fn main() {}\n");
         let packet = Packet::new("tour", "Tour", temp.path().display().to_string(), vec![]);
         let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
         assert_eq!(app.input_mode, InputMode::FilePicker);
@@ -2803,21 +2803,12 @@ mod tests {
 
     #[test]
     fn half_page_navigation_moves_by_half_the_viewport_height() {
-        let temp = tempdir().unwrap();
-        std::fs::write(
-            temp.path().join("main.rs"),
-            (1..=20)
+        let (_temp, mut app) = single_file_app(
+            &(1..=20)
                 .map(|line| format!("line {line}\n"))
                 .collect::<String>(),
-        )
-        .unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
+            |_| {},
         );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
         app.view_metrics.viewport_height = 6;
 
         app.half_page_down();
@@ -2829,15 +2820,7 @@ mod tests {
 
     #[test]
     fn half_page_navigation_uses_a_minimum_step_of_one_line() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\n", |_| {});
         app.view_metrics.viewport_height = 1;
 
         app.half_page_down();
@@ -2849,15 +2832,7 @@ mod tests {
 
     #[test]
     fn visual_selection_creates_range_note_anchor() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |_| {});
         app.enter_visual_mode();
         app.move_cursor(2);
         app.begin_note();
@@ -2871,26 +2846,20 @@ mod tests {
 
     #[test]
     fn visual_selection_collects_related_notes_across_the_range() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        packet.notes.push(Note::new(
-            "main.rs",
-            Anchor::new(2, Some(3)),
-            NoteKind::Overview,
-            "shared range",
-            "This overlaps the selected range.",
-            vec![],
-            None,
-            NoteSource::Agent,
-        ));
-        let note_id = packet.notes[0].id.clone();
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let mut note_id = String::new();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            packet.notes.push(Note::new(
+                "main.rs",
+                Anchor::new(2, Some(3)),
+                NoteKind::Overview,
+                "shared range",
+                "This overlaps the selected range.",
+                vec![],
+                None,
+                NoteSource::Agent,
+            ));
+            note_id = packet.notes[0].id.clone();
+        });
         app.enter_visual_mode();
         app.move_cursor(2);
         app.begin_question();
@@ -2901,28 +2870,20 @@ mod tests {
 
     #[test]
     fn continuing_question_appends_user_follow_up() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut question = Question::new(
-            "main.rs",
-            Some(Anchor::new(2, None)),
-            "Why is this separate?",
-            None,
-            vec![],
-        );
-        question.add_message(
-            crate::model::QuestionMessageRole::Agent,
-            "It separates setup from the hot path.",
-        );
-        packet.questions.push(question);
-
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(2, None)),
+                "Why is this separate?",
+                None,
+                vec![],
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "It separates setup from the hot path.",
+            );
+            packet.questions.push(question);
+        });
         app.cursor_line = 2;
         app.begin_question_follow_up();
         let buffer = app.active_draft_buffer_mut();
@@ -2939,23 +2900,15 @@ mod tests {
 
     #[test]
     fn begin_question_or_follow_up_prefers_open_thread_under_cursor() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        packet.questions.push(Question::new(
-            "main.rs",
-            Some(Anchor::new(2, None)),
-            "Why is this separate?",
-            None,
-            vec![],
-        ));
-
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            packet.questions.push(Question::new(
+                "main.rs",
+                Some(Anchor::new(2, None)),
+                "Why is this separate?",
+                None,
+                vec![],
+            ));
+        });
         app.cursor_line = 2;
         app.begin_question_or_follow_up();
 
@@ -2966,32 +2919,24 @@ mod tests {
 
     #[test]
     fn editing_question_targets_latest_user_follow_up() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut question = Question::new(
-            "main.rs",
-            Some(Anchor::new(2, None)),
-            "Why is this separate?",
-            None,
-            vec![],
-        );
-        question.add_message(
-            crate::model::QuestionMessageRole::Agent,
-            "It separates setup from the hot path.",
-        );
-        question.add_message(
-            crate::model::QuestionMessageRole::User,
-            "What invariant depends on that split?",
-        );
-        packet.questions.push(question);
-
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(2, None)),
+                "Why is this separate?",
+                None,
+                vec![],
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "It separates setup from the hot path.",
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::User,
+                "What invariant depends on that split?",
+            );
+            packet.questions.push(question);
+        });
         app.cursor_line = 2;
         app.begin_edit_current_annotation(false);
         let buffer = app.active_draft_buffer_mut();
@@ -3009,36 +2954,28 @@ mod tests {
 
     #[test]
     fn deleting_question_targets_latest_user_follow_up() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut question = Question::new(
-            "main.rs",
-            Some(Anchor::new(2, None)),
-            "Why is this separate?",
-            None,
-            vec![],
-        );
-        question.add_message(
-            crate::model::QuestionMessageRole::Agent,
-            "It separates setup from the hot path.",
-        );
-        question.add_message(
-            crate::model::QuestionMessageRole::User,
-            "What invariant depends on that split?",
-        );
-        question.add_message(
-            crate::model::QuestionMessageRole::Agent,
-            "The hot path assumes setup has already frozen the scheduler state.",
-        );
-        packet.questions.push(question);
-
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(2, None)),
+                "Why is this separate?",
+                None,
+                vec![],
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "It separates setup from the hot path.",
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::User,
+                "What invariant depends on that split?",
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "The hot path assumes setup has already frozen the scheduler state.",
+            );
+            packet.questions.push(question);
+        });
         app.cursor_line = 2;
         assert!(app.delete_annotation_at_cursor());
         assert_eq!(app.packet.questions.len(), 1);
@@ -3051,62 +2988,78 @@ mod tests {
     }
 
     #[test]
-    fn resolving_question_marks_it_answered() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
+    fn editing_user_follow_up_preserves_later_agent_reply() {
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(2, None)),
+                "Why is this separate?",
+                None,
+                vec![],
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::User,
+                "What invariant depends on that split?",
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "The scheduler is already frozen by then.",
+            );
+            packet.questions.push(question);
+        });
+        app.cursor_line = 2;
+        app.begin_edit_current_annotation(false);
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "Which invariant depends on that split?".to_string();
+        buffer.cursor = buffer.text.len();
+        app.commit_draft().unwrap();
+
+        assert_eq!(app.packet.questions[0].conversation.len(), 2);
+        assert_eq!(
+            app.packet.questions[0].conversation[0].body,
+            "Which invariant depends on that split?"
         );
-        packet.questions.push(Question::new(
-            "main.rs",
-            Some(Anchor::new(1, None)),
-            "Why is main empty?",
-            None,
-            vec![],
-        ));
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        assert_eq!(
+            app.packet.questions[0].conversation[1].body,
+            "The scheduler is already frozen by then."
+        );
+    }
+
+    #[test]
+    fn resolving_question_marks_it_answered() {
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |packet| {
+            packet.questions.push(Question::new(
+                "main.rs",
+                Some(Anchor::new(1, None)),
+                "Why is main empty?",
+                None,
+                vec![],
+            ));
+        });
         assert!(app.resolve_current_question());
         assert_eq!(app.packet.questions[0].status, QuestionStatus::Answered);
     }
 
     #[test]
     fn reopening_question_marks_it_open_again() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut question = Question::new(
-            "main.rs",
-            Some(Anchor::new(1, None)),
-            "Why is main empty?",
-            None,
-            vec![],
-        );
-        question.status = QuestionStatus::Answered;
-        packet.questions.push(question);
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(1, None)),
+                "Why is main empty?",
+                None,
+                vec![],
+            );
+            question.status = QuestionStatus::Answered;
+            packet.questions.push(question);
+        });
         assert!(app.reopen_current_question());
         assert_eq!(app.packet.questions[0].status, QuestionStatus::Open);
     }
 
     #[test]
     fn next_annotation_wraps_back_to_the_head() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\nfour\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\nfour\n", |_| {});
         app.view_metrics.annotation_lines = vec![2, 4];
         app.cursor_line = 4;
         app.jump_to_next_annotation();
@@ -3115,15 +3068,7 @@ mod tests {
 
     #[test]
     fn previous_annotation_wraps_back_to_the_tail() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\nfour\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\nfour\n", |_| {});
         app.view_metrics.annotation_lines = vec![2, 4];
         app.cursor_line = 2;
         app.jump_to_previous_annotation();
@@ -3171,15 +3116,7 @@ mod tests {
 
     #[test]
     fn export_without_open_questions_sets_message_instead_of_erroring() {
-        let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let packet = Packet::new(
-            "tour",
-            "Tour",
-            temp.path().display().to_string(),
-            vec![TrackedFile::new("main.rs")],
-        );
-        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        let (_temp, mut app) = single_file_app("fn main() {}\n", |_| {});
 
         app.export_questions().unwrap();
 

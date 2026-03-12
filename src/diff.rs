@@ -66,6 +66,7 @@ pub struct DiffFile {
     pub hunks: Vec<DiffHunk>,
     pub is_binary: bool,
     pub is_too_large: bool,
+    pub context_content: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,20 +214,9 @@ impl GitDiffLoader {
             return Ok(Vec::new());
         }
 
-        let path = file
-            .new_path
-            .as_deref()
-            .or(file.old_path.as_deref())
-            .context("diff file is missing a path")?;
-
-        let content = match file.status {
-            FileStatus::Deleted => self.fetch_blob_content(Path::new(
-                file.old_path
-                    .as_deref()
-                    .context("deleted diff file is missing its original path")?,
-            ))?,
-            _ => fs::read_to_string(self.root.join(path))
-                .with_context(|| format!("failed to read {}", self.root.join(path).display()))?,
+        let path = file.display_path();
+        let Some(content) = file.context_content.as_deref() else {
+            return Ok(Vec::new());
         };
 
         let lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
@@ -302,7 +292,9 @@ impl GitDiffLoader {
             .repo
             .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))?;
 
-        parse_diff(&diff)
+        let mut files = parse_diff(&diff)?;
+        self.attach_worktree_context(&mut files, head_tree.as_ref())?;
+        Ok(files)
     }
 
     fn get_commit_range_diff(&self, commit_ids: &[String]) -> Result<Vec<DiffFile>> {
@@ -325,7 +317,9 @@ impl GitDiffLoader {
             .repo
             .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)?;
 
-        parse_diff(&diff)
+        let mut files = parse_diff(&diff)?;
+        self.attach_tree_context(&mut files, old_tree.as_ref(), &new_tree)?;
+        Ok(files)
     }
 
     fn get_working_tree_with_commits_diff(&self, commit_ids: &[String]) -> Result<Vec<DiffFile>> {
@@ -349,16 +343,78 @@ impl GitDiffLoader {
             .repo
             .diff_tree_to_workdir_with_index(old_tree.as_ref(), Some(&mut opts))?;
 
-        parse_diff(&diff)
+        let mut files = parse_diff(&diff)?;
+        self.attach_worktree_context(&mut files, old_tree.as_ref())?;
+        Ok(files)
     }
 
-    fn fetch_blob_content(&self, file_path: &Path) -> Result<String> {
-        let head = self.repo.head()?.peel_to_tree()?;
-        let entry = head.get_path(file_path)?;
+    fn attach_worktree_context(
+        &self,
+        files: &mut [DiffFile],
+        deleted_tree: Option<&git2::Tree<'_>>,
+    ) -> Result<()> {
+        for file in files {
+            file.context_content = self.read_context_content(file, deleted_tree, None)?;
+        }
+        Ok(())
+    }
+
+    fn attach_tree_context(
+        &self,
+        files: &mut [DiffFile],
+        deleted_tree: Option<&git2::Tree<'_>>,
+        new_tree: &git2::Tree<'_>,
+    ) -> Result<()> {
+        for file in files {
+            file.context_content = self.read_context_content(file, deleted_tree, Some(new_tree))?;
+        }
+        Ok(())
+    }
+
+    fn read_context_content(
+        &self,
+        file: &DiffFile,
+        deleted_tree: Option<&git2::Tree<'_>>,
+        new_tree: Option<&git2::Tree<'_>>,
+    ) -> Result<Option<String>> {
+        if file.is_binary || file.is_too_large {
+            return Ok(None);
+        }
+
+        match file.status {
+            FileStatus::Deleted => file
+                .old_path
+                .as_deref()
+                .map(|path| self.read_tree_content(deleted_tree, path))
+                .transpose(),
+            _ => {
+                let path = file
+                    .new_path
+                    .as_deref()
+                    .or(file.old_path.as_deref())
+                    .context("diff file is missing a path")?;
+                match new_tree {
+                    Some(tree) => Ok(Some(self.read_tree_content(Some(tree), path)?)),
+                    None => Ok(Some(self.read_worktree_content(path)?)),
+                }
+            }
+        }
+    }
+
+    fn read_tree_content(&self, tree: Option<&git2::Tree<'_>>, path: &str) -> Result<String> {
+        let Some(tree) = tree else {
+            return Ok(String::new());
+        };
+        let entry = tree.get_path(Path::new(path))?;
         let blob = self.repo.find_blob(entry.id())?;
         let content = std::str::from_utf8(blob.content())
             .context("failed to decode blob content as UTF-8 for diff context expansion")?;
         Ok(content.to_string())
+    }
+
+    fn read_worktree_content(&self, path: &str) -> Result<String> {
+        fs::read_to_string(self.root.join(path))
+            .with_context(|| format!("failed to read {}", self.root.join(path).display()))
     }
 }
 
@@ -430,6 +486,7 @@ fn parse_diff(diff: &Diff<'_>) -> Result<Vec<DiffFile>> {
             hunks,
             is_binary,
             is_too_large,
+            context_content: None,
         });
     }
 
@@ -674,6 +731,39 @@ mod tests {
                 .flat_map(|hunk| hunk.lines.iter())
                 .any(|line| line.content.contains("println!(\"two\")"))
         );
+    }
+
+    #[test]
+    fn commit_range_gap_expansion_uses_selected_revision_context() {
+        let (temp, repo) = init_repo();
+        let render_lines = |mut lines: Vec<String>| {
+            lines.iter_mut().for_each(|line| line.push('\n'));
+            lines.concat()
+        };
+        let initial = render_lines((1..=200).map(|line| format!("line {line}")).collect());
+        let mut selected_lines = (1..=200)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        selected_lines[19] = "selected top".to_string();
+        selected_lines[179] = "selected bottom".to_string();
+        let selected = render_lines(selected_lines.clone());
+        selected_lines[99] = "worktree middle".to_string();
+        let worktree = render_lines(selected_lines);
+
+        let first = commit_file(&repo, "src/main.rs", &initial, "initial");
+        let second = commit_file(&repo, "src/main.rs", &selected, "split hunks");
+        fs::write(temp.path().join("src/main.rs"), worktree).unwrap();
+
+        let loader = GitDiffLoader::discover(temp.path()).unwrap();
+        let diff_files = loader
+            .diff_for_selection(&DiffSelection::CommitRange(vec![first, second]))
+            .unwrap();
+
+        let file = &diff_files[0];
+        let expanded = loader.fetch_context_lines(file, 100, 100).unwrap();
+
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].content, "line 100");
     }
 
     #[test]

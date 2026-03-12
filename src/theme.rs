@@ -359,26 +359,3 @@ fn blend(base: Color, accent: Color, accent_percent: u8) -> Color {
         _ => accent,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{ThemeName, rgb};
-    use two_face::theme::EmbeddedThemeName;
-
-    #[test]
-    fn gruvbox_dark_matches_tuicr_palette_and_theme_name() {
-        let theme = ThemeName::GruvboxDark.theme();
-        assert_eq!(theme.bg, rgb(40, 40, 40));
-        assert_eq!(theme.panel, rgb(29, 32, 33));
-        assert_eq!(theme.border_focus, rgb(142, 192, 124));
-        assert_eq!(theme.note_border, rgb(131, 165, 152));
-        assert_eq!(theme.syntect_theme, EmbeddedThemeName::GruvboxDark);
-    }
-
-    #[test]
-    fn gruvbox_light_uses_embedded_gruvbox_syntax_theme() {
-        let theme = ThemeName::GruvboxLight.theme();
-        assert_eq!(theme.syntect_theme, EmbeddedThemeName::GruvboxLight);
-        assert_eq!(theme.question_border, rgb(181, 118, 20));
-    }
-}

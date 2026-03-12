@@ -184,122 +184,29 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         return handle_diff_normal_mode(app, key);
     }
     app.clear_message();
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('d') => {
-                app.half_page_down();
-                return Ok(());
-            }
-            KeyCode::Char('u') => {
-                app.half_page_up();
-                return Ok(());
-            }
-            _ => {}
-        }
+    if handle_scroll_shortcut(app, key) || handle_shared_normal_key(app, key)? {
+        return Ok(());
     }
 
-    match key.code {
-        KeyCode::Tab => app.toggle_focus(),
-        KeyCode::Char('?') => app.input_mode = InputMode::Help,
-        KeyCode::Char('j') | KeyCode::Down => match app.focus {
-            FocusPane::Files => app.move_file(1),
-            FocusPane::Source => app.move_cursor(1),
-        },
-        KeyCode::Char('k') | KeyCode::Up => match app.focus {
-            FocusPane::Files => app.move_file(-1),
-            FocusPane::Source => app.move_cursor(-1),
-        },
-        KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Source => app.move_file(-1),
-        KeyCode::Char('l') | KeyCode::Right if app.focus == FocusPane::Source => app.move_file(1),
-        KeyCode::Enter if app.focus == FocusPane::Files => app.focus = FocusPane::Source,
-        KeyCode::Char('g') => app.go_to_first_line(),
-        KeyCode::Char('G') => app.go_to_last_line(),
-        KeyCode::Char('[') => app.jump_to_previous_annotation(),
-        KeyCode::Char(']') => app.jump_to_next_annotation(),
-        KeyCode::PageDown => app.page_down(),
-        KeyCode::PageUp => app.page_up(),
-        KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
-        KeyCode::Char('a') => app.begin_question_or_follow_up(),
-        KeyCode::Char('c') => {
-            app.resolve_current_question();
-        }
-        KeyCode::Char('o') => {
-            app.reopen_current_question();
-        }
-        KeyCode::Char('n') => app.begin_note(),
-        KeyCode::Char('i') => app.begin_edit_current_annotation(false),
-        KeyCode::Char('I') => app.begin_edit_current_annotation(true),
-        KeyCode::Char('f') => app.begin_file_picker()?,
-        KeyCode::Char('/') => app.begin_search(),
-        KeyCode::Char('R') => app.reload_sources()?,
-        KeyCode::Char('s') => app.save()?,
-        KeyCode::Char('y') => app.export_questions()?,
-        KeyCode::Char('x') => app.save_and_quit()?,
-        KeyCode::Char('q') => app.request_quit(),
-        _ => {}
+    if let KeyCode::Char('f') = key.code {
+        app.begin_file_picker()?;
     }
     Ok(())
 }
 
 fn handle_diff_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     app.clear_message();
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('d') => {
-                app.half_page_down();
-                return Ok(());
-            }
-            KeyCode::Char('u') => {
-                app.half_page_up();
-                return Ok(());
-            }
-            _ => {}
-        }
+    if handle_scroll_shortcut(app, key) || handle_shared_normal_key(app, key)? {
+        return Ok(());
     }
 
     match key.code {
         KeyCode::Esc => app.reopen_diff_commit_selector()?,
-        KeyCode::Tab => app.toggle_focus(),
-        KeyCode::Char('?') => app.input_mode = InputMode::Help,
-        KeyCode::Char('j') | KeyCode::Down => match app.focus {
-            FocusPane::Files => app.move_file(1),
-            FocusPane::Source => app.move_cursor(1),
-        },
-        KeyCode::Char('k') | KeyCode::Up => match app.focus {
-            FocusPane::Files => app.move_file(-1),
-            FocusPane::Source => app.move_cursor(-1),
-        },
-        KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Source => app.move_file(-1),
-        KeyCode::Char('l') | KeyCode::Right if app.focus == FocusPane::Source => app.move_file(1),
-        KeyCode::Enter if app.focus == FocusPane::Files => app.focus = FocusPane::Source,
         KeyCode::Enter | KeyCode::Char(' ') if app.focus == FocusPane::Source => {
             app.toggle_diff_gap_at_cursor()?
         }
-        KeyCode::Char('g') => app.go_to_first_line(),
-        KeyCode::Char('G') => app.go_to_last_line(),
-        KeyCode::Char('[') => app.jump_to_previous_annotation(),
-        KeyCode::Char(']') => app.jump_to_next_annotation(),
-        KeyCode::PageDown => app.page_down(),
-        KeyCode::PageUp => app.page_up(),
-        KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
-        KeyCode::Char('a') => app.begin_question_or_follow_up(),
-        KeyCode::Char('c') => {
-            app.resolve_current_question();
-        }
-        KeyCode::Char('o') => {
-            app.reopen_current_question();
-        }
-        KeyCode::Char('n') => app.begin_note(),
-        KeyCode::Char('i') => app.begin_edit_current_annotation(false),
-        KeyCode::Char('I') => app.begin_edit_current_annotation(true),
         KeyCode::Char('m') => app.reopen_diff_commit_selector()?,
-        KeyCode::Char('R') => app.reload_sources()?,
         KeyCode::Char('r') => app.mark_current_diff_file_reviewed_and_next(),
-        KeyCode::Char('/') => app.begin_search(),
-        KeyCode::Char('s') => app.save()?,
-        KeyCode::Char('y') => app.export_questions()?,
-        KeyCode::Char('x') => app.save_and_quit()?,
-        KeyCode::Char('q') => app.request_quit(),
         _ => {}
     }
     Ok(())
@@ -307,18 +214,8 @@ fn handle_diff_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
 
 fn handle_visual_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     app.clear_message();
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('d') => {
-                app.half_page_down();
-                return Ok(());
-            }
-            KeyCode::Char('u') => {
-                app.half_page_up();
-                return Ok(());
-            }
-            _ => {}
-        }
+    if handle_scroll_shortcut(app, key) {
+        return Ok(());
     }
 
     match key.code {
@@ -337,6 +234,66 @@ fn handle_visual_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn handle_scroll_shortcut(app: &mut App, key: KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('d') => {
+            app.half_page_down();
+            true
+        }
+        KeyCode::Char('u') => {
+            app.half_page_up();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_shared_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Tab => app.toggle_focus(),
+        KeyCode::Char('?') => app.input_mode = InputMode::Help,
+        KeyCode::Char('j') | KeyCode::Down => match app.focus {
+            FocusPane::Files => app.move_file(1),
+            FocusPane::Source => app.move_cursor(1),
+        },
+        KeyCode::Char('k') | KeyCode::Up => match app.focus {
+            FocusPane::Files => app.move_file(-1),
+            FocusPane::Source => app.move_cursor(-1),
+        },
+        KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Source => app.move_file(-1),
+        KeyCode::Char('l') | KeyCode::Right if app.focus == FocusPane::Source => app.move_file(1),
+        KeyCode::Enter if app.focus == FocusPane::Files => app.focus = FocusPane::Source,
+        KeyCode::Char('g') => app.go_to_first_line(),
+        KeyCode::Char('G') => app.go_to_last_line(),
+        KeyCode::Char('[') => app.jump_to_previous_annotation(),
+        KeyCode::Char(']') => app.jump_to_next_annotation(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
+        KeyCode::Char('a') => app.begin_question_or_follow_up(),
+        KeyCode::Char('c') => {
+            app.resolve_current_question();
+        }
+        KeyCode::Char('o') => {
+            app.reopen_current_question();
+        }
+        KeyCode::Char('n') => app.begin_note(),
+        KeyCode::Char('i') => app.begin_edit_current_annotation(false),
+        KeyCode::Char('I') => app.begin_edit_current_annotation(true),
+        KeyCode::Char('/') => app.begin_search(),
+        KeyCode::Char('R') => app.reload_sources()?,
+        KeyCode::Char('s') => app.save()?,
+        KeyCode::Char('y') => app.export_questions()?,
+        KeyCode::Char('x') => app.save_and_quit()?,
+        KeyCode::Char('q') => app.request_quit(),
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn handle_draft_mode(app: &mut App, key: KeyEvent) -> Result<()> {

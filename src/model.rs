@@ -149,7 +149,7 @@ impl Packet {
         self.updated_at = Utc::now();
     }
 
-    pub fn ensure_file(&mut self, path: impl Into<String>) {
+    pub fn ensure_file(&mut self, path: impl Into<String>) -> bool {
         let path = path.into();
         if self.files.iter().all(|file| file.path != path) {
             self.files.push(TrackedFile {
@@ -157,7 +157,9 @@ impl Packet {
                 label: None,
                 purpose: None,
             });
+            return true;
         }
+        false
     }
 
     pub fn open_questions(&self) -> impl Iterator<Item = &Question> {

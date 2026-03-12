@@ -1,19 +1,16 @@
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::BaseDirs;
 
-use crate::model::{Packet, TrackedFile};
+use crate::model::Packet;
 use crate::util::slugify;
 
 pub const PACKETS_DIR_NAME: &str = "packets";
 
 #[derive(Debug, Clone)]
 pub struct StoragePaths {
-    pub data_dir: PathBuf,
     pub packets_dir: PathBuf,
 }
 
@@ -22,10 +19,7 @@ impl StoragePaths {
         let base_dirs = BaseDirs::new().context("failed to discover the user data directory")?;
         let data_dir = base_dirs.data_local_dir().join("copanion");
         let packets_dir = data_dir.join(PACKETS_DIR_NAME);
-        Ok(Self {
-            data_dir,
-            packets_dir,
-        })
+        Ok(Self { packets_dir })
     }
 
     pub fn ensure_initialized(&self) -> Result<()> {
@@ -61,9 +55,8 @@ pub fn project_packet_id(root: &Path) -> String {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("packet");
-    let mut hasher = DefaultHasher::new();
-    root.hash(&mut hasher);
-    let suffix = hasher.finish() as u32;
+    let normalized_root = root.to_string_lossy().replace('\\', "/");
+    let suffix = stable_path_hash(&normalized_root) as u32;
     format!("{}-{suffix:08x}", slugify(stem))
 }
 
@@ -107,24 +100,20 @@ pub fn write_packet(path: &Path, packet: &Packet) -> Result<()> {
     fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
 }
 
-pub fn merge_files(packet: &mut Packet, root: &Path, files: &[PathBuf]) -> bool {
-    let mut changed = false;
-    for file in files {
-        let normalized = normalize_repo_path(file, root);
-        if packet
-            .files
-            .iter()
-            .all(|tracked| tracked.path != normalized)
-        {
-            packet.files.push(TrackedFile::new(normalized));
-            changed = true;
-        }
-    }
-    changed
-}
-
 pub fn workspace_root_string(root: &Path) -> String {
     root.to_string_lossy().into_owned()
+}
+
+fn stable_path_hash(path: &str) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -134,7 +123,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        StoragePaths, discover_project_root, merge_files, normalize_repo_path, project_packet_id,
+        StoragePaths, discover_project_root, normalize_repo_path, project_packet_id,
         read_packet_if_exists, workspace_root_string, write_packet,
     };
     use crate::model::Packet;
@@ -155,14 +144,13 @@ mod tests {
         let first = project_packet_id(root);
         let second = project_packet_id(root);
         assert_eq!(first, second);
-        assert!(first.starts_with("my-repo-"));
+        assert_eq!(first, "my-repo-0f85f5c2");
     }
 
     #[test]
     fn project_packet_path_lives_under_user_data_dir() {
         let temp = tempdir().unwrap();
         let paths = StoragePaths {
-            data_dir: temp.path().join("copanion"),
             packets_dir: temp.path().join("copanion/packets"),
         };
         let packet = paths.project_packet_path(Path::new("/workspace/repo"));
@@ -171,24 +159,6 @@ mod tests {
             packet.extension().and_then(|ext| ext.to_str()),
             Some("toml")
         );
-    }
-
-    #[test]
-    fn merge_files_adds_new_entries_once() {
-        let mut packet = Packet::new("demo", "Demo", "/repo", vec![]);
-        let changed = merge_files(
-            &mut packet,
-            Path::new("/repo"),
-            &[Path::new("/repo/src/main.rs").into()],
-        );
-        assert!(changed);
-        assert_eq!(packet.files.len(), 1);
-        let changed_again = merge_files(
-            &mut packet,
-            Path::new("/repo"),
-            &[Path::new("/repo/src/main.rs").into()],
-        );
-        assert!(!changed_again);
     }
 
     #[test]
