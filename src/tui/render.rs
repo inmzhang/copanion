@@ -859,7 +859,15 @@ mod tests {
 
     #[test]
     fn source_view_injects_note_and_question_cards() {
-        let mut packet = Packet::new("Demo", vec![TrackedFile::new("src/main.rs")]);
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut packet = Packet::new(
+            "demo",
+            "Demo",
+            root.path().display().to_string(),
+            vec![TrackedFile::new("src/main.rs")],
+        );
         packet.notes.push(Note::new(
             "src/main.rs",
             Anchor::new(1, None),
@@ -877,15 +885,7 @@ mod tests {
             None,
             vec![],
         ));
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("src")).unwrap();
-        std::fs::write(root.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-        let app = App::load(
-            root.path().to_path_buf(),
-            root.path().join("packet.toml"),
-            packet,
-        )
-        .unwrap();
+        let app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
         let (lines, metrics) = build_source_lines(&app, 80);
         let rendered = lines
             .iter()

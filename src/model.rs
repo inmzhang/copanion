@@ -8,7 +8,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Packet {
     pub version: u32,
+    pub session_id: String,
     pub title: String,
+    pub workspace_root: String,
     #[serde(default)]
     pub files: Vec<TrackedFile>,
     #[serde(default)]
@@ -103,11 +105,18 @@ pub enum QuestionStatus {
 }
 
 impl Packet {
-    pub fn new(title: impl Into<String>, files: Vec<TrackedFile>) -> Self {
+    pub fn new(
+        session_id: impl Into<String>,
+        title: impl Into<String>,
+        workspace_root: impl Into<String>,
+        files: Vec<TrackedFile>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             version: 1,
+            session_id: session_id.into(),
             title: title.into(),
+            workspace_root: workspace_root.into(),
             files,
             notes: Vec::new(),
             questions: Vec::new(),

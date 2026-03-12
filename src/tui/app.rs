@@ -63,6 +63,7 @@ pub struct App {
     pub root: PathBuf,
     pub packet_path: PathBuf,
     pub packet: Packet,
+    pub output_to_stdout: bool,
     pub files: Vec<LoadedFile>,
     pub current_file: usize,
     pub cursor_line: usize,
@@ -76,15 +77,17 @@ pub struct App {
     pub dirty: bool,
     pub discard_guard: bool,
     pub quit_notice: Option<String>,
+    pub quit_export: Option<String>,
     pub composer_cursor_screen_pos: Option<(u16, u16)>,
 }
 
 impl App {
-    pub fn load(root: PathBuf, packet_path: PathBuf, packet: Packet) -> Result<Self> {
+    pub fn load(packet_path: PathBuf, packet: Packet, output_to_stdout: bool) -> Result<Self> {
+        let root = PathBuf::from(&packet.workspace_root);
         let files = load_files(&root, &packet);
         if files.is_empty() {
             bail!(
-                "packet {} does not track any files yet; add files with `copanion new -f ...` or `copanion note add`",
+                "session {} does not track any files yet; start copanion with one or more source files",
                 packet_path.display()
             );
         }
@@ -93,6 +96,7 @@ impl App {
             root,
             packet_path,
             packet,
+            output_to_stdout,
             files,
             current_file: 0,
             cursor_line: 1,
@@ -106,6 +110,7 @@ impl App {
             dirty: false,
             discard_guard: false,
             quit_notice: None,
+            quit_export: None,
             composer_cursor_screen_pos: None,
         })
     }
@@ -286,9 +291,14 @@ impl App {
 
     pub fn export_questions(&mut self) -> Result<()> {
         let export = export::generate_question_export(&self.packet)?;
-        let message = clipboard::copy_text(&export)?;
         self.discard_guard = false;
-        self.message = Some(format!("open questions {message}"));
+        if self.output_to_stdout {
+            self.message = Some("open questions rendered to stdout on exit".to_string());
+            self.quit_export = Some(export);
+        } else {
+            let message = clipboard::copy_text(&export)?;
+            self.message = Some(format!("open questions {message}"));
+        }
         Ok(())
     }
 
@@ -296,11 +306,19 @@ impl App {
         self.save()?;
         let notice = if self.packet.open_questions().count() > 0 {
             let export = export::generate_question_export(&self.packet)?;
-            let copy_result = clipboard::copy_text(&export)?;
-            format!(
-                "saved {} and exported the open questions ({copy_result})",
-                self.packet_path.display()
-            )
+            if self.output_to_stdout {
+                self.quit_export = Some(export);
+                format!(
+                    "saved {} and wrote the open questions to stdout",
+                    self.packet_path.display()
+                )
+            } else {
+                let copy_result = clipboard::copy_text(&export)?;
+                format!(
+                    "saved {} and exported the open questions ({copy_result})",
+                    self.packet_path.display()
+                )
+            }
         } else {
             format!("saved {}", self.packet_path.display())
         };
@@ -543,7 +561,12 @@ mod tests {
     fn app_stages_questions_against_current_line() {
         let temp = tempdir().unwrap();
         std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
-        let mut packet = Packet::new("Tour", vec![TrackedFile::new("main.rs")]);
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
         packet.notes.push(Note::new(
             "main.rs",
             Anchor::new(1, None),
@@ -554,12 +577,7 @@ mod tests {
             None,
             NoteSource::Agent,
         ));
-        let mut app = App::load(
-            temp.path().to_path_buf(),
-            temp.path().join(".copanion/packets/tour.toml"),
-            packet,
-        )
-        .unwrap();
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
         app.focus = FocusPane::Source;
         app.begin_question();
         {

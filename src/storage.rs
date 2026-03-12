@@ -1,56 +1,57 @@
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use directories::BaseDirs;
 
 use crate::model::{Packet, TrackedFile};
 use crate::util::slugify;
 
-pub const COPANION_DIR: &str = ".copanion";
-pub const PACKET_DIR: &str = "packets";
-
 #[derive(Debug, Clone)]
-pub struct ProjectPaths {
-    pub root: PathBuf,
-    pub copanion_dir: PathBuf,
-    pub packets_dir: PathBuf,
+pub struct SessionPaths {
+    pub data_dir: PathBuf,
+    pub sessions_dir: PathBuf,
 }
 
-impl ProjectPaths {
-    pub fn from_root(root: impl Into<PathBuf>) -> Self {
-        let root = root.into();
-        let copanion_dir = root.join(COPANION_DIR);
-        let packets_dir = copanion_dir.join(PACKET_DIR);
-        Self {
-            root,
-            copanion_dir,
-            packets_dir,
-        }
+impl SessionPaths {
+    pub fn discover() -> Result<Self> {
+        let base_dirs = BaseDirs::new().context("failed to discover the user data directory")?;
+        let data_dir = base_dirs.data_local_dir().join("copanion");
+        let sessions_dir = data_dir.join("sessions");
+        Ok(Self {
+            data_dir,
+            sessions_dir,
+        })
     }
 
     pub fn ensure_initialized(&self) -> Result<()> {
-        fs::create_dir_all(&self.packets_dir).with_context(|| {
+        fs::create_dir_all(&self.sessions_dir).with_context(|| {
             format!(
-                "failed to create packet directory at {}",
-                self.packets_dir.display()
+                "failed to create the session directory at {}",
+                self.sessions_dir.display()
             )
         })?;
         Ok(())
     }
 
-    pub fn packet_path(&self, packet_ref: &str) -> PathBuf {
-        let candidate = Path::new(packet_ref);
-        if candidate.components().count() > 1 || candidate.extension().is_some() {
-            if candidate.is_absolute() {
-                candidate.to_path_buf()
-            } else {
-                self.root.join(candidate)
-            }
-        } else {
-            self.packets_dir
-                .join(format!("{}.toml", slugify(packet_ref)))
-        }
+    pub fn session_path(&self, session_ref: &str) -> PathBuf {
+        self.sessions_dir
+            .join(format!("{}.toml", slugify(session_ref)))
     }
+}
+
+pub fn default_session_id(root: &Path) -> String {
+    let stem = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("session");
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    let suffix = hasher.finish() as u32;
+    format!("{}-{suffix:08x}", slugify(stem))
 }
 
 pub fn normalize_repo_path(path: &Path, root: &Path) -> String {
@@ -64,8 +65,16 @@ pub fn normalize_repo_path(path: &Path, root: &Path) -> String {
 
 pub fn read_packet(path: &Path) -> Result<Packet> {
     let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read packet from {}", path.display()))?;
+        .with_context(|| format!("failed to read session from {}", path.display()))?;
     toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+pub fn read_packet_if_exists(path: &Path) -> Result<Option<Packet>> {
+    if path.exists() {
+        read_packet(path).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn write_packet(path: &Path, packet: &Packet) -> Result<()> {
@@ -73,32 +82,28 @@ pub fn write_packet(path: &Path, packet: &Packet) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let raw = toml::to_string_pretty(packet).context("failed to render packet as TOML")?;
+    let raw = toml::to_string_pretty(packet).context("failed to render session as TOML")?;
     fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
 }
 
-pub fn create_packet(
-    paths: &ProjectPaths,
-    packet_ref: &str,
-    title: impl Into<String>,
-    files: Vec<PathBuf>,
-    overwrite: bool,
-) -> Result<PathBuf> {
-    paths.ensure_initialized()?;
-    let packet_path = paths.packet_path(packet_ref);
-    if packet_path.exists() && !overwrite {
-        bail!(
-            "packet already exists at {} (pass --force to overwrite)",
-            packet_path.display()
-        );
+pub fn merge_files(packet: &mut Packet, root: &Path, files: &[PathBuf]) -> bool {
+    let mut changed = false;
+    for file in files {
+        let normalized = normalize_repo_path(file, root);
+        if packet
+            .files
+            .iter()
+            .all(|tracked| tracked.path != normalized)
+        {
+            packet.files.push(TrackedFile::new(normalized));
+            changed = true;
+        }
     }
-    let tracked_files = files
-        .into_iter()
-        .map(|path| TrackedFile::new(normalize_repo_path(&path, &paths.root)))
-        .collect();
-    let packet = Packet::new(title, tracked_files);
-    write_packet(&packet_path, &packet)?;
-    Ok(packet_path)
+    changed
+}
+
+pub fn workspace_root_string(root: &Path) -> String {
+    root.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -107,32 +112,48 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ProjectPaths, create_packet, normalize_repo_path, read_packet};
+    use super::{
+        SessionPaths, default_session_id, merge_files, normalize_repo_path, read_packet_if_exists,
+        workspace_root_string, write_packet,
+    };
+    use crate::model::Packet;
 
     #[test]
-    fn packet_ref_without_extension_resolves_under_copanion() {
+    fn session_path_lives_under_user_data_dir() {
         let temp = tempdir().unwrap();
-        let paths = ProjectPaths::from_root(temp.path());
-        let packet = paths.packet_path("learning-pass");
-        assert!(packet.ends_with(".copanion/packets/learning-pass.toml"));
+        let paths = SessionPaths {
+            data_dir: temp.path().join("copanion"),
+            sessions_dir: temp.path().join("copanion/sessions"),
+        };
+        let packet = paths.session_path("learning-pass");
+        assert!(packet.ends_with("copanion/sessions/learning-pass.toml"));
     }
 
     #[test]
-    fn packet_roundtrip_preserves_files() {
-        let temp = tempdir().unwrap();
-        let paths = ProjectPaths::from_root(temp.path());
-        let packet_path = create_packet(
-            &paths,
-            "scheduler-tour",
-            "Scheduler Tour",
-            vec![Path::new("src/main.rs").to_path_buf()],
-            false,
-        )
-        .unwrap();
-        let packet = read_packet(&packet_path).unwrap();
-        assert_eq!(packet.title, "Scheduler Tour");
+    fn default_session_ids_are_stable_and_slugged() {
+        let root = Path::new("/workspace/copanion");
+        let first = default_session_id(root);
+        let second = default_session_id(root);
+        assert_eq!(first, second);
+        assert!(first.starts_with("copanion-"));
+    }
+
+    #[test]
+    fn merge_files_adds_new_entries_once() {
+        let mut packet = Packet::new("demo", "Demo", "/repo", vec![]);
+        let changed = merge_files(
+            &mut packet,
+            Path::new("/repo"),
+            &[Path::new("src/main.rs").into()],
+        );
+        assert!(changed);
         assert_eq!(packet.files.len(), 1);
-        assert_eq!(packet.files[0].path, "src/main.rs");
+        let changed_again = merge_files(
+            &mut packet,
+            Path::new("/repo"),
+            &[Path::new("src/main.rs").into()],
+        );
+        assert!(!changed_again);
     }
 
     #[test]
@@ -140,5 +161,20 @@ mod tests {
         let root = Path::new("/repo");
         let actual = normalize_repo_path(Path::new("/repo/src/lib.rs"), root);
         assert_eq!(actual, "src/lib.rs");
+    }
+
+    #[test]
+    fn session_roundtrip_preserves_workspace_root() {
+        let temp = tempdir().unwrap();
+        let session_path = temp.path().join("sessions/demo.toml");
+        let packet = Packet::new(
+            "demo",
+            "Demo",
+            workspace_root_string(Path::new("/repo")),
+            vec![],
+        );
+        write_packet(&session_path, &packet).unwrap();
+        let loaded = read_packet_if_exists(&session_path).unwrap().unwrap();
+        assert_eq!(loaded.workspace_root, "/repo");
     }
 }

@@ -17,10 +17,9 @@ use crate::storage;
 
 use self::app::{App, FocusPane, InputMode};
 
-pub fn run(packet_path: &Path) -> Result<()> {
+pub fn run(packet_path: &Path, output_to_stdout: bool) -> Result<()> {
     let packet = storage::read_packet(packet_path)?;
-    let root = std::env::current_dir()?;
-    let mut app = App::load(root, packet_path.to_path_buf(), packet)?;
+    let mut app = App::load(packet_path.to_path_buf(), packet, output_to_stdout)?;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -34,6 +33,9 @@ pub fn run(packet_path: &Path) -> Result<()> {
 
     if let Some(message) = app.quit_notice.take() {
         println!("{message}");
+    }
+    if let Some(export) = app.quit_export.take() {
+        print!("{export}");
     }
 
     result

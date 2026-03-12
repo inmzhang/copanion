@@ -88,13 +88,13 @@ mod tests {
 
     #[test]
     fn export_requires_open_questions() {
-        let packet = Packet::new("Test", vec![]);
+        let packet = Packet::new("test", "Test", "/repo", vec![]);
         assert!(generate_question_export(&packet).is_err());
     }
 
     #[test]
     fn export_includes_notes_and_questions() {
-        let mut packet = Packet::new("Tour", vec![]);
+        let mut packet = Packet::new("tour", "Tour", "/repo", vec![]);
         packet.notes.push(Note::new(
             "src/main.rs",
             Anchor::new(10, Some(12)),
