@@ -10,6 +10,7 @@ pub struct ReviewExportContext {
     pub selection: DiffSelection,
     pub review_entries: Vec<CommitInfo>,
     pub changed_paths: Vec<String>,
+    pub visible_question_ids: Vec<String>,
 }
 
 pub fn generate_question_export(packet: &Packet, packet_path: &Path) -> Result<String> {
@@ -91,13 +92,13 @@ pub fn generate_review_question_export(
     packet_path: &Path,
     review: &ReviewExportContext,
 ) -> Result<String> {
-    let changed_paths = review
-        .changed_paths
+    let visible_question_ids = review
+        .visible_question_ids
         .iter()
         .collect::<std::collections::BTreeSet<_>>();
     let open_questions = packet
         .questions_requiring_reply()
-        .filter(|question| changed_paths.contains(&question.path))
+        .filter(|question| visible_question_ids.contains(&question.id))
         .collect::<Vec<_>>();
 
     if open_questions.is_empty() {
@@ -107,7 +108,7 @@ pub fn generate_review_question_export(
     let mut output = String::new();
     output.push_str("# Copanion Diff Review\n\n");
     output.push_str(
-        "Please answer the open review comment threads below. The attached notes are your review comments captured while reading this diff.\n\n",
+        "Please answer the review comments below. Any review notes are listed separately.\n\n",
     );
     output.push_str(&format!("Packet: {}\n", packet.title));
     output.push_str(&format!(
@@ -136,28 +137,7 @@ pub fn generate_review_question_export(
     }
     output.push('\n');
 
-    output.push_str("Your review comments (notes):\n");
-    let notes = packet
-        .notes
-        .iter()
-        .filter(|note| changed_paths.contains(&note.path))
-        .collect::<Vec<_>>();
-    if notes.is_empty() {
-        output.push_str("- none yet\n");
-    } else {
-        for note in notes {
-            output.push_str(&format!(
-                "- [{}:{}] {} ({:?}, {:?})\n",
-                note.path, note.anchor, note.title, note.kind, note.source
-            ));
-            for line in note.body.lines() {
-                output.push_str(&format!("  {}\n", line));
-            }
-        }
-    }
-    output.push('\n');
-
-    output.push_str("Open comment threads:\n");
+    output.push_str("Review comments:\n");
     for (index, question) in open_questions.iter().enumerate() {
         output.push_str(&format!(
             "{}. id={} [{}{}] {}\n",
@@ -324,6 +304,7 @@ mod tests {
                     },
                 ],
                 changed_paths: vec!["src/main.rs".to_string()],
+                visible_question_ids: vec![packet.questions[0].id.clone()],
             },
         )
         .unwrap();
@@ -332,7 +313,47 @@ mod tests {
         assert!(export.contains("working tree plus selected commits"));
         assert!(export.contains("Uncommitted changes"));
         assert!(export.contains("abc1234 Refine scheduler"));
-        assert!(export.contains("Looks risky"));
+        assert!(export.contains("Review comments:"));
+        assert!(export.contains("Why is this branch separate?"));
+        assert!(!export.contains("Review notes:"));
+        assert!(!export.contains("Looks risky"));
         assert!(!export.contains("Ignore me"));
+    }
+
+    #[test]
+    fn review_export_only_includes_visible_diff_questions() {
+        let mut packet = Packet::new("tour", "Tour", "/repo", vec![]);
+        let visible_question = Question::new(
+            "src/main.rs",
+            Some(Anchor::new(11, None)),
+            "Visible diff comment",
+            None,
+            vec![],
+        );
+        let hidden_question = Question::new(
+            "src/main.rs",
+            Some(Anchor::new(99, None)),
+            "Tracked-mode question outside current diff context",
+            None,
+            vec![],
+        );
+        let visible_id = visible_question.id.clone();
+        packet.questions.push(visible_question);
+        packet.questions.push(hidden_question);
+
+        let export = generate_review_question_export(
+            &packet,
+            Path::new("/tmp/packet.toml"),
+            &ReviewExportContext {
+                selection: DiffSelection::WorkingTree,
+                review_entries: vec![CommitInfo::working_tree_entry()],
+                changed_paths: vec!["src/main.rs".to_string()],
+                visible_question_ids: vec![visible_id],
+            },
+        )
+        .unwrap();
+
+        assert!(export.contains("Visible diff comment"));
+        assert!(!export.contains("Tracked-mode question outside current diff context"));
     }
 }

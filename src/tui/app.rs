@@ -1317,7 +1317,13 @@ impl App {
     }
 
     pub fn export_questions(&mut self) -> Result<()> {
-        let export = self.question_export_text()?;
+        let export = match self.question_export_text() {
+            Ok(export) => export,
+            Err(error) => {
+                self.message = Some(error.to_string());
+                return Ok(());
+            }
+        };
         self.discard_guard = false;
         if self.output_to_stdout {
             self.message = Some(if self.is_diff_mode() {
@@ -1390,6 +1396,7 @@ impl App {
                         .iter()
                         .map(|file| file.display_path().to_string())
                         .collect(),
+                    visible_question_ids: self.visible_diff_review_question_ids(),
                 },
             );
         }
@@ -1833,9 +1840,19 @@ impl App {
         let Some(browser) = &mut self.diff_browser else {
             return Ok(());
         };
-        browser.commit_options = browser.loader.selection_options(DEFAULT_COMMIT_LIMIT)?;
-        browser.commit_cursor = 0;
-        browser.commit_selection_range = Some((0, 0));
+        let previous_options = browser.commit_options.clone();
+        let previous_cursor = browser.commit_cursor;
+        let previous_selection = browser.commit_selection_range;
+        let refreshed_options = browser.loader.selection_options(DEFAULT_COMMIT_LIMIT)?;
+        let (restored_cursor, restored_selection) = restore_commit_selector_state(
+            &previous_options,
+            previous_cursor,
+            previous_selection,
+            &refreshed_options,
+        );
+        browser.commit_options = refreshed_options;
+        browser.commit_cursor = restored_cursor;
+        browser.commit_selection_range = restored_selection;
         self.input_mode = InputMode::CommitSelect;
         self.message = Some(
             "select uncommitted changes or a contiguous commit range, then press Enter".to_string(),
@@ -2202,6 +2219,33 @@ impl App {
             self.message = Some(format!("marked {path} reviewed"));
         }
     }
+
+    fn visible_diff_review_question_ids(&self) -> Vec<String> {
+        let Some(browser) = self.diff_browser.as_ref() else {
+            return Vec::new();
+        };
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+
+        for row in &browser.view_metrics.rows {
+            let DiffRow::Annotation { path, line_no } = row else {
+                continue;
+            };
+
+            for question in self
+                .questions_for_path(path)
+                .into_iter()
+                .filter(|question| question.anchor.map(anchor_display_line) == Some(*line_no))
+                .filter(|question| question.needs_agent_reply())
+            {
+                if seen.insert(question.id.clone()) {
+                    ids.push(question.id.clone());
+                }
+            }
+        }
+
+        ids
+    }
 }
 
 impl TextBuffer {
@@ -2481,14 +2525,81 @@ fn latest_user_message_index(question: &Question) -> Option<usize> {
         .rposition(|message| message.role == QuestionMessageRole::User)
 }
 
+fn restore_commit_selector_state(
+    previous_options: &[CommitInfo],
+    previous_cursor: usize,
+    previous_selection: Option<(usize, usize)>,
+    refreshed_options: &[CommitInfo],
+) -> (usize, Option<(usize, usize)>) {
+    if refreshed_options.is_empty() {
+        return (0, None);
+    }
+
+    let previous_cursor_id = previous_options
+        .get(previous_cursor)
+        .map(|entry| entry.id.as_str());
+    let matched_selection_indices = previous_selection
+        .and_then(|(start, end)| previous_options.get(start..=end))
+        .map(|selected_entries| {
+            selected_entries
+                .iter()
+                .filter_map(|entry| {
+                    refreshed_options
+                        .iter()
+                        .position(|candidate| candidate.id == entry.id)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let restored_selection = if matched_selection_indices.is_empty() {
+        None
+    } else {
+        Some((
+            *matched_selection_indices
+                .iter()
+                .min()
+                .expect("matched selection indices should not be empty"),
+            *matched_selection_indices
+                .iter()
+                .max()
+                .expect("matched selection indices should not be empty"),
+        ))
+    };
+
+    let restored_cursor = previous_cursor_id
+        .and_then(|id| refreshed_options.iter().position(|entry| entry.id == id))
+        .or_else(|| restored_selection.map(|(_, end)| end))
+        .unwrap_or(0);
+
+    (restored_cursor, restored_selection)
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use tempfile::tempdir;
 
+    use crate::diff::CommitInfo;
     use crate::model::{Note, NoteKind, NoteSource, Packet, Question, QuestionStatus, TrackedFile};
 
-    use super::{App, DraftKind, DraftTarget, FocusPane, InputMode, TextBuffer};
+    use super::{
+        App, DraftKind, DraftTarget, FocusPane, InputMode, TextBuffer,
+        restore_commit_selector_state,
+    };
     use crate::model::Anchor;
+
+    fn fake_commit(id: &str) -> CommitInfo {
+        CommitInfo {
+            id: id.to_string(),
+            short_id: id.to_string(),
+            branch_name: None,
+            summary: format!("commit {id}"),
+            body: None,
+            author: "Test".to_string(),
+            time: Utc::now(),
+        }
+    }
 
     #[test]
     fn text_buffer_basic_editing() {
@@ -3017,5 +3128,66 @@ mod tests {
         app.cursor_line = 2;
         app.jump_to_previous_annotation();
         assert_eq!(app.cursor_line, 4);
+    }
+
+    #[test]
+    fn restoring_commit_selector_state_preserves_selected_range_and_cursor() {
+        let previous = vec![
+            CommitInfo::working_tree_entry(),
+            fake_commit("c3"),
+            fake_commit("c2"),
+            fake_commit("c1"),
+        ];
+        let refreshed = vec![
+            CommitInfo::working_tree_entry(),
+            fake_commit("c4"),
+            fake_commit("c3"),
+            fake_commit("c2"),
+            fake_commit("c1"),
+        ];
+
+        let (cursor, selection) =
+            restore_commit_selector_state(&previous, 2, Some((0, 2)), &refreshed);
+
+        assert_eq!(cursor, 3);
+        assert_eq!(selection, Some((0, 3)));
+    }
+
+    #[test]
+    fn restoring_commit_selector_state_drops_missing_worktree_entry_but_keeps_commits() {
+        let previous = vec![
+            CommitInfo::working_tree_entry(),
+            fake_commit("c3"),
+            fake_commit("c2"),
+        ];
+        let refreshed = vec![fake_commit("c4"), fake_commit("c3"), fake_commit("c2")];
+
+        let (cursor, selection) =
+            restore_commit_selector_state(&previous, 0, Some((0, 2)), &refreshed);
+
+        assert_eq!(cursor, 2);
+        assert_eq!(selection, Some((1, 2)));
+    }
+
+    #[test]
+    fn export_without_open_questions_sets_message_instead_of_erroring() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+
+        app.export_questions().unwrap();
+
+        assert_eq!(
+            app.message.as_deref(),
+            Some("packet has no open questions waiting for an agent reply")
+        );
+        assert!(!app.should_quit);
+        assert!(app.quit_export.is_none());
     }
 }

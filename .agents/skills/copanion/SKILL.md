@@ -1,13 +1,13 @@
 ---
 name: "copanion"
-description: "Use when a user wants durable Copanion updates in the canonical per-project packet under Copanion's system data directory. This includes two bounded workflows: saving line-anchored study notes or follow-up question/comment threads for a small explicit file set or diff review, and answering exported Copanion question/comment threads by writing agent replies back into the same packet. Do not use for generic repo exploration, broad architecture tours, or implementation work that does not need packet writeback."
+description: "Use when a user wants durable Copanion updates in the canonical per-project packet under Copanion's system data directory for code study or change review. This includes two bounded workflows: saving line-anchored study notes or follow-up question/comment threads for a small explicit file set or diff review, and answering exported Copanion question/comment threads by writing agent replies back into the same packet. Do not use for generic repo exploration, broad architecture tours, or implementation work that does not need packet writeback."
 ---
 
 # Copanion
 
 ## Overview
 
-Use this skill when the user wants durable Copanion state, not just a chat answer. The canonical packet under Copanion's system data directory is the source of truth for study notes, source-mode question threads, and diff-review comment threads.
+Use this skill when the user wants durable Copanion state for code study or change review, not just a chat answer. The canonical packet under Copanion's system data directory is the source of truth for study notes, source-mode question threads, and diff-review comment threads.
 
 ## Trigger Gate
 

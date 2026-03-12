@@ -482,17 +482,17 @@ fn render_diff_status(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::CommitSelect => "j/k move  Space toggle range  Enter open diff  q quit",
         InputMode::Help => "q or Esc closes help",
         InputMode::Normal if app.current_open_question().is_some() => {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Normal
             if app
                 .current_question()
                 .is_some_and(|question| question.status != QuestionStatus::Open) =>
         {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Normal => {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  n note  i edit  / search  r review+next  m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Visual => "j/k move  a comment  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
@@ -752,6 +752,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             "Enter",
             "open the selected diff range, or expand/collapse hidden context",
         ),
+        help_line("Esc", "in diff mode, return to the commit selector"),
         help_line("m", "in diff mode, reopen the commit selector"),
         help_line("r", "mark the current diff file reviewed and jump next"),
         help_line(

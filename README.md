@@ -1,20 +1,20 @@
-# copanion: TUI for Code Study
+# copanion
 
-Study a codebase in your terminal, keep notes on exact lines, and keep coding agents inside the same learning loop instead of bouncing between disconnected chats and scratch notes.
+Study a codebase or review a diff in your terminal, keep notes and comments on exact lines, and keep coding agents inside the same loop instead of bouncing between disconnected chats and scratch notes.
 
 ![demo](./demo/copanion-demo.gif)
 
-## Why I built this
+## Why
 
-When I study an unfamiliar codebase, I struggle with the constant back-and-forth between the source and a separate explanation. A card-style companion for guidance and notes, anchored directly to the code, makes the learning flow much easier to hold onto.
+When I study an unfamiliar codebase or review a change, I struggle with the constant back-and-forth between the source and a separate explanation. A card-style companion for guidance, notes, and review comments, anchored directly to the code, makes that flow much easier to hold onto.
 
 Asking follow-up questions has the same problem. By the time I want help from an agent, I still have to gather the exact source location and package the right context, and once the agent replies the answer usually lives somewhere else. `copanion` removes that busywork: keep notes beside the code while you read, export the exact question threads that still need help, write the agent replies back into the same packet, then continue or close the thread inside the TUI.
 
 ## Overview
 
-`copanion` is a Rust CLI/TUI for persistent source-learning packets with an explicit agent loop.
+`copanion` is a Rust CLI/TUI for persistent code-study and change-review packets with an explicit agent loop.
 
-It opens tracked files in a terminal UI, injects note cards directly below the lines they explain, and lets you stage follow-up question threads in place. Notes stay local. Only open threads that still need an agent reply are exported back to the clipboard or stdout.
+It opens tracked files or Git diffs in a terminal UI, injects note cards and comment threads directly below the lines they explain, and lets you stage follow-up threads in place. Notes stay local. Only open threads that still need an agent reply are exported back to the clipboard or stdout.
 
 Each project gets one canonical packet stored under Copanion's user data directory, usually `~/.local/share/copanion/packets/`. `copanion` discovers the project root, maps it to that packet path, and reopens the same packet every time you come back to the project.
 
@@ -22,7 +22,7 @@ If a packet has no tracked files yet, `copanion` opens directly into the fuzzy f
 
 ## Learning Loop
 
-`copanion` is built around a repeatable loop with agents in the middle, not outside the tool:
+`copanion` is built around a repeatable study/review loop with agents in the middle, not outside the tool:
 
 1. Read code in the TUI and attach notes or open questions to exact lines.
 2. Export only the question threads that still need an agent reply.
@@ -87,7 +87,7 @@ claude skill add "$(pwd)/.claude/skill"
 
 ## Usage
 
-Run `copanion` in the repository you want to study:
+Run `copanion` in the repository you want to study or review:
 
 ```bash
 cd /path/to/your/repo
@@ -102,7 +102,7 @@ To browse recent commits or uncommitted changes instead of the tracked-source vi
 copanion --diff
 ```
 
-Diff mode is Git-backed. It opens a commit selector first, lets you choose either the working tree or a contiguous commit range, and then shows a unified patch view with the same Copanion packet loaded beside note/comment counts.
+Diff mode is Git-backed. It opens a commit selector first, lets you choose either the working tree or a contiguous commit range, and then shows a unified patch view with the same Copanion packet loaded beside note/comment counts. It borrows heavily from [tuicr](https://github.com/agavra/tuicr).
 
 ### Options
 
@@ -213,6 +213,7 @@ Start diff mode with `copanion --diff`. In this mode, `a` creates a review comme
 |-----|--------|
 | `Space` | In the commit selector, toggle or extend the contiguous selection range; in the diff view, expand or collapse hidden context |
 | `Enter` | In the commit selector, open the selected working-tree or commit-range diff; in the diff view, expand or collapse hidden context |
+| `Esc` | Return from the diff view to the commit selector |
 | `m` | Reopen the commit selector from the diff view |
 | `r` | Mark the current diff file reviewed and jump to the next file |
 | `R` | Reload the active diff selection |

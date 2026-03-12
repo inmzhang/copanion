@@ -258,6 +258,7 @@ fn handle_diff_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 
     match key.code {
+        KeyCode::Esc => app.reopen_diff_commit_selector()?,
         KeyCode::Tab => app.toggle_focus(),
         KeyCode::Char('?') => app.input_mode = InputMode::Help,
         KeyCode::Char('j') | KeyCode::Down => match app.focus {
