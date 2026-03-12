@@ -3,69 +3,158 @@ use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::FontStyle;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
 use crate::theme;
 
 pub type StyledSegments = Vec<(Style, String)>;
 
-pub fn highlight_file(path: &str, lines: &[String]) -> Vec<StyledSegments> {
-    let syntax_set = syntax_set();
-    let syntax = syntax_set
-        .find_syntax_for_file(Path::new(path))
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    let mut highlighter = HighlightLines::new(syntax, theme());
+type HighlightedLines = Vec<Option<StyledSegments>>;
 
-    lines
-        .iter()
-        .map(|line| {
+pub fn highlight_file(path: &str, lines: &[String]) -> Vec<StyledSegments> {
+    let highlighter = SyntaxHighlighter::new(theme::active().syntect_theme);
+    highlighter
+        .highlight_file_lines(Path::new(path), lines)
+        .unwrap_or_else(|| {
+            lines
+                .iter()
+                .map(|line| Some(default_segments(line)))
+                .collect()
+        })
+        .into_iter()
+        .zip(lines.iter())
+        .map(|(segments, line)| segments.unwrap_or_else(|| default_segments(line)))
+        .collect()
+}
+
+struct SyntaxHighlighter {
+    theme_name: EmbeddedThemeName,
+}
+
+impl Default for SyntaxHighlighter {
+    fn default() -> Self {
+        Self::new(EmbeddedThemeName::Base16EightiesDark)
+    }
+}
+
+impl SyntaxHighlighter {
+    fn new(theme_name: EmbeddedThemeName) -> Self {
+        Self { theme_name }
+    }
+
+    fn highlight_file_lines(&self, file_path: &Path, lines: &[String]) -> Option<HighlightedLines> {
+        let syntax = self.get_syntax(file_path).or_else(|| {
+            lines
+                .first()
+                .and_then(|line| syntax_set().find_syntax_by_first_line(line))
+        })?;
+        let mut highlighter = HighlightLines::new(syntax, theme_set().get(self.theme_name));
+
+        Some(Self::collect_line_highlights(lines, |line| {
             highlighter
-                .highlight_line(line, syntax_set)
-                .map(|segments| {
-                    segments
+                .highlight_line(line, syntax_set())
+                .ok()
+                .map(|ranges| {
+                    ranges
                         .into_iter()
                         .map(|(style, text)| (to_ratatui_style(style), text.to_string()))
                         .collect()
                 })
-                .unwrap_or_else(|_| vec![(Style::default(), line.clone())])
-        })
-        .collect()
+        }))
+    }
+
+    fn collect_line_highlights<F>(lines: &[String], mut highlight_line: F) -> HighlightedLines
+    where
+        F: FnMut(&str) -> Option<StyledSegments>,
+    {
+        let mut result = Vec::with_capacity(lines.len());
+        for line in lines {
+            result.push(highlight_line(line));
+        }
+        result
+    }
+
+    fn fallback_extension(ext: &str) -> Option<&'static str> {
+        match ext {
+            "jsx" | "mjs" | "cjs" => Some("js"),
+            "hbs" | "handlebars" | "mustache" | "ejs" | "pug" | "jade" | "njk" => Some("html"),
+            "mdx" => Some("md"),
+            "jsonc" | "json5" | "prisma" => Some("json"),
+            "heex" => Some("rb"),
+            _ => None,
+        }
+    }
+
+    fn fallback_filename(name: &str) -> Option<&'static str> {
+        match name {
+            "Containerfile" => Some("sh"),
+            "Justfile" | "justfile" => Some("sh"),
+            _ => None,
+        }
+    }
+
+    fn get_syntax(&self, file_path: &Path) -> Option<&'static SyntaxReference> {
+        if let Some(ext) = file_path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(syntax) = syntax_set().find_syntax_by_extension(ext) {
+                return Some(syntax);
+            }
+
+            let normalized = ext.to_ascii_lowercase();
+            if normalized != ext
+                && let Some(syntax) = syntax_set().find_syntax_by_extension(&normalized)
+            {
+                return Some(syntax);
+            }
+
+            if let Some(fallback) = Self::fallback_extension(&normalized)
+                && let Some(syntax) = syntax_set().find_syntax_by_extension(fallback)
+            {
+                return Some(syntax);
+            }
+        }
+
+        if let Some(filename) = file_path.file_name().and_then(|name| name.to_str()) {
+            if let Some(syntax) = syntax_set().find_syntax_by_token(filename) {
+                return Some(syntax);
+            }
+
+            if let Some(syntax) = syntax_set().find_syntax_by_name(filename) {
+                return Some(syntax);
+            }
+
+            if let Some(fallback) = Self::fallback_filename(filename)
+                && let Some(syntax) = syntax_set().find_syntax_by_extension(fallback)
+            {
+                return Some(syntax);
+            }
+        }
+
+        None
+    }
 }
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
-fn theme() -> &'static Theme {
-    theme_set()
-        .themes
-        .get(theme::active().syntect_theme)
-        .or_else(|| theme_set().themes.get("base16-ocean.dark"))
-        .or_else(|| theme_set().themes.values().next())
-        .expect("syntect default theme set should not be empty")
+fn theme_set() -> &'static EmbeddedLazyThemeSet {
+    static THEME_SET: OnceLock<EmbeddedLazyThemeSet> = OnceLock::new();
+    THEME_SET.get_or_init(two_face::theme::extra)
 }
 
-fn theme_set() -> &'static ThemeSet {
-    static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
-    THEME_SET.get_or_init(ThemeSet::load_defaults)
+fn default_segments(line: &str) -> StyledSegments {
+    vec![(Style::default(), line.to_string())]
 }
 
 fn to_ratatui_style(style: syntect::highlighting::Style) -> Style {
-    let mut ratatui_style = Style::default()
-        .fg(Color::Rgb(
-            style.foreground.r,
-            style.foreground.g,
-            style.foreground.b,
-        ))
-        .bg(Color::Rgb(
-            style.background.r,
-            style.background.g,
-            style.background.b,
-        ));
+    let mut ratatui_style = Style::default().fg(Color::Rgb(
+        style.foreground.r,
+        style.foreground.g,
+        style.foreground.b,
+    ));
     if style.font_style.contains(FontStyle::BOLD) {
         ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
     }
@@ -80,20 +169,23 @@ fn to_ratatui_style(style: syntect::highlighting::Style) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::highlight_file;
+    use std::path::Path;
+
+    use super::{SyntaxHighlighter, highlight_file};
+    use two_face::theme::EmbeddedThemeName;
 
     #[test]
-    fn rust_sources_receive_styled_segments() {
+    fn rust_sources_receive_colored_segments() {
         let highlighted = highlight_file(
             "src/main.rs",
             &[String::from("fn main() { println!(\"hi\"); }")],
         );
         assert_eq!(highlighted.len(), 1);
-        assert!(!highlighted[0].is_empty());
+        assert!(highlighted[0].iter().any(|(style, _)| style.fg.is_some()));
     }
 
     #[test]
-    fn toml_python_and_typescript_highlight_by_default() {
+    fn toml_python_and_typescript_have_real_syntax_colors() {
         for (path, line) in [
             ("Cargo.toml", "version = \"0.1.0\""),
             ("tool.py", "def main():"),
@@ -101,7 +193,85 @@ mod tests {
         ] {
             let highlighted = highlight_file(path, &[line.to_string()]);
             assert_eq!(highlighted.len(), 1);
-            assert!(!highlighted[0].is_empty());
+            assert!(
+                highlighted[0].iter().any(|(style, _)| style.fg.is_some()),
+                "expected syntax color for {path}"
+            );
         }
+    }
+
+    #[test]
+    fn should_find_syntax_for_uppercase_extension() {
+        let highlighter = SyntaxHighlighter::default();
+        assert!(highlighter.get_syntax(Path::new("SRC/MAIN.RS")).is_some());
+    }
+
+    #[test]
+    fn should_find_syntax_for_build_filename_token() {
+        let highlighter = SyntaxHighlighter::default();
+        assert!(highlighter.get_syntax(Path::new("BUILD")).is_some());
+    }
+
+    #[test]
+    fn should_find_syntax_for_typescript_family() {
+        let highlighter = SyntaxHighlighter::default();
+        for ext in ["ts", "tsx", "mts", "cts", "jsx", "mjs", "cjs"] {
+            let path = format!("file.{ext}");
+            assert!(
+                highlighter.get_syntax(Path::new(&path)).is_some(),
+                "should find syntax for .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_find_syntax_for_common_fallback_extensions() {
+        let highlighter = SyntaxHighlighter::default();
+        for ext in [
+            "jsx", "mjs", "cjs", "hbs", "mustache", "ejs", "pug", "njk", "mdx", "jsonc", "json5",
+            "prisma", "heex",
+        ] {
+            let path = format!("file.{ext}");
+            assert!(
+                highlighter.get_syntax(Path::new(&path)).is_some(),
+                "should find syntax for .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_find_syntax_for_fallback_filenames() {
+        let highlighter = SyntaxHighlighter::default();
+        for name in ["Containerfile", "Justfile", "justfile"] {
+            assert!(
+                highlighter.get_syntax(Path::new(name)).is_some(),
+                "should find syntax for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_detect_syntax_from_shebang_when_extensionless() {
+        let highlighter = SyntaxHighlighter::default();
+        let lines = vec![
+            "#!/usr/bin/env python".to_string(),
+            "print('hello')".to_string(),
+        ];
+        let highlighted = highlighter.highlight_file_lines(Path::new("script"), &lines);
+        assert!(highlighted.is_some());
+        assert_eq!(highlighted.unwrap().len(), lines.len());
+    }
+
+    #[test]
+    fn toml_highlights_under_gruvbox_dark_theme() {
+        let highlighter = SyntaxHighlighter::new(EmbeddedThemeName::GruvboxDark);
+        let lines = vec!["version = \"0.1.0\"".to_string()];
+        let highlighted = highlighter
+            .highlight_file_lines(Path::new("Cargo.toml"), &lines)
+            .expect("toml syntax should resolve");
+        let spans = highlighted[0]
+            .as_ref()
+            .expect("line should highlight under gruvbox dark");
+        assert!(spans.iter().any(|(style, _)| style.fg.is_some()));
     }
 }

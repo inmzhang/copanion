@@ -2,6 +2,7 @@ use std::sync::{OnceLock, RwLock};
 
 use clap::ValueEnum;
 use ratatui::style::Color;
+use two_face::theme::EmbeddedThemeName;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
@@ -33,7 +34,7 @@ pub struct Theme {
     pub cursor_line: Color,
     pub danger: Color,
     pub success: Color,
-    pub syntect_theme: &'static str,
+    pub syntect_theme: EmbeddedThemeName,
 }
 
 impl ThemeName {
@@ -43,142 +44,14 @@ impl ThemeName {
 
     pub fn theme(self) -> Theme {
         match self {
-            ThemeName::Dark => Theme {
-                bg: rgb(14, 20, 28),
-                panel: rgb(18, 28, 38),
-                border: rgb(62, 86, 108),
-                border_focus: rgb(129, 194, 255),
-                text: rgb(228, 237, 245),
-                muted: rgb(138, 159, 178),
-                accent: rgb(102, 214, 201),
-                note_bg: rgb(22, 45, 58),
-                note_border: rgb(102, 214, 201),
-                question_bg: rgb(59, 42, 21),
-                question_border: rgb(236, 194, 83),
-                cursor_line: rgb(39, 55, 71),
-                danger: rgb(234, 106, 108),
-                success: rgb(144, 203, 104),
-                syntect_theme: "base16-ocean.dark",
-            },
-            ThemeName::Light => Theme {
-                bg: rgb(244, 241, 235),
-                panel: rgb(252, 250, 245),
-                border: rgb(171, 162, 151),
-                border_focus: rgb(35, 102, 140),
-                text: rgb(33, 37, 41),
-                muted: rgb(105, 112, 119),
-                accent: rgb(0, 135, 122),
-                note_bg: rgb(224, 242, 237),
-                note_border: rgb(0, 135, 122),
-                question_bg: rgb(252, 236, 209),
-                question_border: rgb(182, 128, 32),
-                cursor_line: rgb(226, 234, 241),
-                danger: rgb(190, 57, 61),
-                success: rgb(53, 122, 74),
-                syntect_theme: "InspiredGitHub",
-            },
-            ThemeName::OneDark => Theme {
-                bg: rgb(24, 28, 35),
-                panel: rgb(34, 39, 46),
-                border: rgb(81, 90, 99),
-                border_focus: rgb(97, 175, 239),
-                text: rgb(220, 223, 228),
-                muted: rgb(146, 152, 161),
-                accent: rgb(86, 182, 194),
-                note_bg: rgb(30, 51, 60),
-                note_border: rgb(86, 182, 194),
-                question_bg: rgb(66, 48, 29),
-                question_border: rgb(229, 192, 123),
-                cursor_line: rgb(44, 52, 63),
-                danger: rgb(224, 108, 117),
-                success: rgb(152, 195, 121),
-                syntect_theme: "base16-eighties.dark",
-            },
-            ThemeName::GruvboxDark => Theme {
-                bg: rgb(29, 32, 33),
-                panel: rgb(40, 40, 40),
-                border: rgb(102, 92, 84),
-                border_focus: rgb(131, 165, 152),
-                text: rgb(235, 219, 178),
-                muted: rgb(168, 153, 132),
-                accent: rgb(142, 192, 124),
-                note_bg: rgb(50, 73, 48),
-                note_border: rgb(142, 192, 124),
-                question_bg: rgb(78, 58, 36),
-                question_border: rgb(250, 189, 47),
-                cursor_line: rgb(60, 56, 54),
-                danger: rgb(251, 73, 52),
-                success: rgb(184, 187, 38),
-                syntect_theme: "Solarized (dark)",
-            },
-            ThemeName::GruvboxLight => Theme {
-                bg: rgb(251, 241, 199),
-                panel: rgb(249, 245, 215),
-                border: rgb(189, 174, 147),
-                border_focus: rgb(69, 133, 136),
-                text: rgb(60, 56, 54),
-                muted: rgb(124, 111, 100),
-                accent: rgb(104, 157, 106),
-                note_bg: rgb(228, 238, 212),
-                note_border: rgb(104, 157, 106),
-                question_bg: rgb(246, 227, 185),
-                question_border: rgb(215, 153, 33),
-                cursor_line: rgb(235, 228, 194),
-                danger: rgb(204, 36, 29),
-                success: rgb(121, 116, 14),
-                syntect_theme: "Solarized (light)",
-            },
-            ThemeName::CatppuccinMocha => Theme {
-                bg: rgb(24, 24, 37),
-                panel: rgb(30, 30, 46),
-                border: rgb(88, 91, 112),
-                border_focus: rgb(137, 180, 250),
-                text: rgb(205, 214, 244),
-                muted: rgb(166, 173, 200),
-                accent: rgb(148, 226, 213),
-                note_bg: rgb(31, 54, 62),
-                note_border: rgb(148, 226, 213),
-                question_bg: rgb(70, 57, 35),
-                question_border: rgb(249, 226, 175),
-                cursor_line: rgb(49, 50, 68),
-                danger: rgb(243, 139, 168),
-                success: rgb(166, 227, 161),
-                syntect_theme: "base16-mocha.dark",
-            },
-            ThemeName::CatppuccinLatte => Theme {
-                bg: rgb(239, 241, 245),
-                panel: rgb(230, 233, 239),
-                border: rgb(156, 160, 176),
-                border_focus: rgb(30, 102, 245),
-                text: rgb(76, 79, 105),
-                muted: rgb(108, 111, 133),
-                accent: rgb(23, 146, 153),
-                note_bg: rgb(213, 237, 236),
-                note_border: rgb(23, 146, 153),
-                question_bg: rgb(248, 234, 209),
-                question_border: rgb(223, 142, 29),
-                cursor_line: rgb(220, 224, 232),
-                danger: rgb(210, 15, 57),
-                success: rgb(64, 160, 43),
-                syntect_theme: "base16-ocean.light",
-            },
-            ThemeName::AyuLight => Theme {
-                bg: rgb(250, 248, 240),
-                panel: rgb(255, 253, 245),
-                border: rgb(204, 199, 178),
-                border_focus: rgb(36, 116, 144),
-                text: rgb(77, 84, 86),
-                muted: rgb(112, 121, 123),
-                accent: rgb(85, 149, 77),
-                note_bg: rgb(233, 244, 228),
-                note_border: rgb(85, 149, 77),
-                question_bg: rgb(252, 239, 214),
-                question_border: rgb(250, 173, 37),
-                cursor_line: rgb(236, 233, 222),
-                danger: rgb(242, 117, 113),
-                success: rgb(134, 179, 0),
-                syntect_theme: "InspiredGitHub",
-            },
+            ThemeName::Dark => dark_theme(),
+            ThemeName::Light => light_theme(),
+            ThemeName::OneDark => onedark_theme(),
+            ThemeName::GruvboxDark => gruvbox_dark_theme(),
+            ThemeName::GruvboxLight => gruvbox_light_theme(),
+            ThemeName::CatppuccinMocha => catppuccin_mocha_theme(),
+            ThemeName::CatppuccinLatte => catppuccin_latte_theme(),
+            ThemeName::AyuLight => ayu_light_theme(),
         }
     }
 }
@@ -203,6 +76,292 @@ fn active_theme_name_lock() -> &'static RwLock<ThemeName> {
     ACTIVE_THEME.get_or_init(|| RwLock::new(ThemeName::default()))
 }
 
+#[derive(Clone, Copy)]
+struct CatppuccinFlavor {
+    base: Color,
+    mantle: Color,
+    surface1: Color,
+    surface2: Color,
+    text: Color,
+    overlay0: Color,
+    red: Color,
+    yellow: Color,
+    green: Color,
+    teal: Color,
+    blue: Color,
+}
+
+#[derive(Clone, Copy)]
+struct GruvboxFlavor {
+    dark: bool,
+    bg0: Color,
+    bg1: Color,
+    bg4: Color,
+    selected_bg: Color,
+    fg0: Color,
+    grey0: Color,
+    red: Color,
+    yellow: Color,
+    green: Color,
+    aqua: Color,
+    blue: Color,
+}
+
+fn dark_theme() -> Theme {
+    themed(
+        rgb(30, 30, 30),
+        rgb(24, 24, 28),
+        rgb(110, 110, 110),
+        rgb(90, 200, 255),
+        Color::White,
+        rgb(160, 160, 160),
+        rgb(90, 220, 240),
+        rgb(90, 170, 255),
+        rgb(255, 210, 90),
+        rgb(70, 70, 70),
+        rgb(240, 90, 90),
+        rgb(80, 220, 120),
+        EmbeddedThemeName::Base16EightiesDark,
+    )
+}
+
+fn light_theme() -> Theme {
+    themed(
+        rgb(210, 210, 220),
+        rgb(245, 243, 232),
+        rgb(100, 100, 100),
+        rgb(0, 60, 140),
+        rgb(0, 0, 0),
+        rgb(80, 80, 80),
+        rgb(0, 100, 120),
+        rgb(0, 60, 140),
+        rgb(140, 80, 0),
+        rgb(200, 200, 220),
+        rgb(160, 0, 0),
+        rgb(0, 100, 0),
+        EmbeddedThemeName::Base16OceanLight,
+    )
+}
+
+fn ayu_light_theme() -> Theme {
+    themed(
+        rgb(255, 255, 255),
+        rgb(250, 250, 250),
+        rgb(217, 216, 215),
+        rgb(54, 163, 217),
+        rgb(92, 103, 115),
+        rgb(171, 176, 182),
+        rgb(54, 163, 217),
+        rgb(54, 163, 217),
+        rgb(231, 197, 71),
+        rgb(240, 238, 228),
+        rgb(240, 113, 120),
+        rgb(134, 179, 0),
+        EmbeddedThemeName::OneHalfLight,
+    )
+}
+
+fn onedark_theme() -> Theme {
+    themed(
+        rgb(33, 37, 43),
+        rgb(40, 44, 52),
+        rgb(62, 68, 82),
+        rgb(97, 175, 239),
+        rgb(171, 178, 191),
+        rgb(92, 99, 112),
+        rgb(86, 182, 194),
+        rgb(97, 175, 239),
+        rgb(229, 192, 123),
+        rgb(62, 68, 82),
+        rgb(224, 108, 117),
+        rgb(152, 195, 121),
+        EmbeddedThemeName::OneHalfDark,
+    )
+}
+
+fn catppuccin_latte_theme() -> Theme {
+    let flavor = CatppuccinFlavor {
+        base: rgb(239, 241, 245),
+        mantle: rgb(230, 233, 239),
+        surface1: rgb(188, 192, 204),
+        surface2: rgb(172, 176, 190),
+        text: rgb(76, 79, 105),
+        overlay0: rgb(156, 160, 176),
+        red: rgb(210, 15, 57),
+        yellow: rgb(223, 142, 29),
+        green: rgb(64, 160, 43),
+        teal: rgb(23, 146, 153),
+        blue: rgb(30, 102, 245),
+    };
+    catppuccin_theme(flavor, EmbeddedThemeName::CatppuccinLatte)
+}
+
+fn catppuccin_mocha_theme() -> Theme {
+    let flavor = CatppuccinFlavor {
+        base: rgb(30, 30, 46),
+        mantle: rgb(24, 24, 37),
+        surface1: rgb(69, 71, 90),
+        surface2: rgb(88, 91, 112),
+        text: rgb(205, 214, 244),
+        overlay0: rgb(108, 112, 134),
+        red: rgb(243, 139, 168),
+        yellow: rgb(249, 226, 175),
+        green: rgb(166, 227, 161),
+        teal: rgb(148, 226, 213),
+        blue: rgb(137, 180, 250),
+    };
+    catppuccin_theme(flavor, EmbeddedThemeName::CatppuccinMocha)
+}
+
+fn gruvbox_dark_theme() -> Theme {
+    let flavor = GruvboxFlavor {
+        dark: true,
+        bg0: rgb(29, 32, 33),
+        bg1: rgb(40, 40, 40),
+        bg4: rgb(80, 73, 69),
+        selected_bg: rgb(60, 56, 54),
+        fg0: rgb(212, 190, 152),
+        grey0: rgb(124, 111, 100),
+        red: rgb(251, 73, 52),
+        yellow: rgb(250, 189, 47),
+        green: rgb(184, 187, 38),
+        aqua: rgb(142, 192, 124),
+        blue: rgb(131, 165, 152),
+    };
+    gruvbox_theme(flavor)
+}
+
+fn gruvbox_light_theme() -> Theme {
+    let flavor = GruvboxFlavor {
+        dark: false,
+        bg0: rgb(249, 245, 215),
+        bg1: rgb(245, 237, 202),
+        bg4: rgb(221, 199, 161),
+        selected_bg: rgb(235, 219, 178),
+        fg0: rgb(101, 71, 53),
+        grey0: rgb(168, 153, 132),
+        red: rgb(157, 0, 6),
+        yellow: rgb(181, 118, 20),
+        green: rgb(121, 116, 14),
+        aqua: rgb(66, 123, 88),
+        blue: rgb(7, 102, 120),
+    };
+    gruvbox_theme(flavor)
+}
+
+fn catppuccin_theme(flavor: CatppuccinFlavor, syntect_theme: EmbeddedThemeName) -> Theme {
+    themed(
+        flavor.mantle,
+        flavor.base,
+        flavor.surface2,
+        flavor.blue,
+        flavor.text,
+        flavor.overlay0,
+        flavor.teal,
+        flavor.blue,
+        flavor.yellow,
+        flavor.surface1,
+        flavor.red,
+        flavor.green,
+        syntect_theme,
+    )
+}
+
+fn gruvbox_theme(flavor: GruvboxFlavor) -> Theme {
+    let syntect_theme = if flavor.dark {
+        EmbeddedThemeName::GruvboxDark
+    } else {
+        EmbeddedThemeName::GruvboxLight
+    };
+    themed(
+        flavor.bg1,
+        flavor.bg0,
+        flavor.bg4,
+        flavor.aqua,
+        flavor.fg0,
+        flavor.grey0,
+        flavor.aqua,
+        flavor.blue,
+        flavor.yellow,
+        flavor.selected_bg,
+        flavor.red,
+        flavor.green,
+        syntect_theme,
+    )
+}
+
+fn themed(
+    bg: Color,
+    panel: Color,
+    border: Color,
+    border_focus: Color,
+    text: Color,
+    muted: Color,
+    accent: Color,
+    note_border: Color,
+    question_border: Color,
+    cursor_line: Color,
+    danger: Color,
+    success: Color,
+    syntect_theme: EmbeddedThemeName,
+) -> Theme {
+    Theme {
+        bg,
+        panel,
+        border,
+        border_focus,
+        text,
+        muted,
+        accent,
+        note_bg: blend(panel, note_border, 20),
+        note_border,
+        question_bg: blend(panel, question_border, 20),
+        question_border,
+        cursor_line,
+        danger,
+        success,
+        syntect_theme,
+    }
+}
+
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
+}
+
+fn blend(base: Color, accent: Color, accent_percent: u8) -> Color {
+    debug_assert!(accent_percent <= 100);
+    match (base, accent) {
+        (Color::Rgb(br, bg, bb), Color::Rgb(ar, ag, ab)) => {
+            let p = u16::from(accent_percent);
+            let inv = 100_u16.saturating_sub(p);
+            let mix = |base_component: u8, accent_component: u8| -> u8 {
+                ((u16::from(base_component) * inv + u16::from(accent_component) * p) / 100) as u8
+            };
+            rgb(mix(br, ar), mix(bg, ag), mix(bb, ab))
+        }
+        _ => accent,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ThemeName, rgb};
+    use two_face::theme::EmbeddedThemeName;
+
+    #[test]
+    fn gruvbox_dark_matches_tuicr_palette_and_theme_name() {
+        let theme = ThemeName::GruvboxDark.theme();
+        assert_eq!(theme.bg, rgb(40, 40, 40));
+        assert_eq!(theme.panel, rgb(29, 32, 33));
+        assert_eq!(theme.border_focus, rgb(142, 192, 124));
+        assert_eq!(theme.note_border, rgb(131, 165, 152));
+        assert_eq!(theme.syntect_theme, EmbeddedThemeName::GruvboxDark);
+    }
+
+    #[test]
+    fn gruvbox_light_uses_embedded_gruvbox_syntax_theme() {
+        let theme = ThemeName::GruvboxLight.theme();
+        assert_eq!(theme.syntect_theme, EmbeddedThemeName::GruvboxLight);
+        assert_eq!(theme.question_border, rgb(181, 118, 20));
+    }
 }
