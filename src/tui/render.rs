@@ -14,6 +14,15 @@ use super::app::{
     App, DraftKind, DraftTarget, FilePickerState, FocusPane, InputMode, PromptDraft, ViewMetrics,
 };
 
+#[derive(Clone, Copy)]
+struct SourceLineState {
+    digits: usize,
+    selected: bool,
+    has_note: bool,
+    has_question: bool,
+    in_visual_selection: bool,
+}
+
 fn theme() -> Theme {
     theme::active()
 }
@@ -48,7 +57,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
         InputMode::FilePicker => render_file_picker(frame, app, sections[1]),
         InputMode::Search => render_search(frame, app, sections[1]),
-        InputMode::Normal => {}
+        InputMode::Normal | InputMode::Visual => {}
     }
 
     if let Some((x, y)) = app.composer_cursor_screen_pos {
@@ -163,9 +172,15 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_source_view(frame: &mut Frame, app: &mut App, area: Rect) {
-    let focused = app.focus == FocusPane::Source && app.input_mode == InputMode::Normal;
+    let focused = app.focus == FocusPane::Source
+        && matches!(app.input_mode, InputMode::Normal | InputMode::Visual);
+    let title = if let Some(anchor) = app.visual_selection() {
+        format!(" {} [visual {}] ", app.current_path(), anchor)
+    } else {
+        format!(" {} ", app.current_path())
+    };
     let block = Block::default()
-        .title(format!(" {} ", app.current_path()))
+        .title(title)
         .borders(Borders::ALL)
         .style(Style::default().bg(theme().panel).fg(theme().text))
         .border_style(border_style(focused));
@@ -205,8 +220,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let current_notes = app.notes_for_current_line().len();
     let hints = match app.input_mode {
         InputMode::Normal => {
-            "Tab focus  j/k move  [] jump  dd delete  a question  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a question  n note  i edit  f add file  / search"
         }
+        InputMode::Visual => "j/k move  a question  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
         InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
@@ -214,6 +230,10 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::Help => "q or Esc closes help",
     };
     let message = app.message.as_deref().unwrap_or(hints);
+    let selection = app
+        .visual_selection()
+        .map(|anchor| format!("  visual {}", anchor))
+        .unwrap_or_default();
     let line = Line::from(vec![
         Span::styled(
             format!(" {focus} "),
@@ -222,8 +242,8 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             format!(
-                "line {}  {}  {} attached notes",
-                app.cursor_line, dirty, current_notes
+                "line {}{}  {}  {} attached notes",
+                app.cursor_line, selection, dirty, current_notes
             ),
             Style::default().fg(theme().muted),
         ),
@@ -257,12 +277,17 @@ fn render_help(frame: &mut Frame, area: Rect) {
         help_line("j / k", "move through the selected pane"),
         help_line("h / l", "switch files from the source pane"),
         help_line("[ / ]", "jump to the previous or next annotated line"),
-        help_line("a", "open a QUESTION draft at the current source line"),
-        help_line("n", "open a NOTE draft at the current source line"),
+        help_line(
+            "v / V",
+            "start a visual selection for a ranged note or question",
+        ),
+        help_line("a", "open a QUESTION draft at the cursor or selected range"),
+        help_line("n", "open a NOTE draft at the cursor or selected range"),
         help_line(
             "i",
             "edit the question under the cursor, or fall back to the note",
         ),
+        help_line("Esc", "leave visual mode or close the current popup"),
         help_line(
             "I",
             "edit the note under the cursor, or fall back to the question",
@@ -583,13 +608,26 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
         let source_notes = notes
             .iter()
             .copied()
-            .filter(|note| note.anchor.start_line == line_no)
+            .filter(|note| super::app::anchor_display_line(note.anchor) == line_no)
             .collect::<Vec<_>>();
         let source_questions = questions
             .iter()
             .copied()
-            .filter(|question| question.anchor.map(|anchor| anchor.start_line) == Some(line_no))
+            .filter(|question| {
+                question.anchor.map(super::app::anchor_display_line) == Some(line_no)
+            })
             .collect::<Vec<_>>();
+        let line_has_note = notes
+            .iter()
+            .copied()
+            .any(|note| super::app::anchor_contains_line(note.anchor, line_no));
+        let line_has_question = questions.iter().copied().any(|question| {
+            question
+                .anchor
+                .map(|anchor| super::app::anchor_contains_line(anchor, line_no))
+                .unwrap_or(false)
+        });
+        let in_visual_selection = app.is_line_in_visual_selection(line_no);
 
         line_to_row.push(rendered.len());
         if !source_notes.is_empty() || !source_questions.is_empty() {
@@ -600,10 +638,13 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             line_no,
             &content,
             highlighted,
-            digits,
-            line_no == app.cursor_line,
-            !source_notes.is_empty(),
-            !source_questions.is_empty(),
+            SourceLineState {
+                digits,
+                selected: line_no == app.cursor_line,
+                has_note: line_has_note,
+                has_question: line_has_question,
+                in_visual_selection,
+            },
         ));
 
         for note in source_notes {
@@ -639,33 +680,36 @@ fn render_source_line(
     line_no: usize,
     content: &str,
     highlighted: Option<&crate::syntax::StyledSegments>,
-    digits: usize,
-    selected: bool,
-    has_note: bool,
-    has_question: bool,
+    state: SourceLineState,
 ) -> Line<'static> {
     let mut prefix = " ".to_string();
-    if has_note {
+    if state.has_note {
         prefix = "●".to_string();
     }
-    if has_question {
+    if state.has_question {
         prefix = "◌".to_string();
     }
-    if has_note && has_question {
+    if state.has_note && state.has_question {
         prefix = "◆".to_string();
     }
 
-    let line_bg = if selected {
-        theme().cursor_line
+    let line_bg = match (state.selected, state.in_visual_selection) {
+        (true, true) => blend_color(theme().panel, theme().border_focus, 28),
+        (true, false) => theme().cursor_line,
+        (false, true) => blend_color(theme().panel, theme().border_focus, 18),
+        (false, false) => theme().panel,
+    };
+    let prefix_fg = if state.in_visual_selection {
+        theme().border_focus
     } else {
-        theme().panel
+        theme().accent
     };
 
     let mut spans = vec![
-        Span::styled(prefix, Style::default().fg(theme().accent).bg(line_bg)),
+        Span::styled(prefix, Style::default().fg(prefix_fg).bg(line_bg)),
         Span::styled(" ", Style::default().bg(line_bg)),
         Span::styled(
-            format!("{line_no:>digits$}", digits = digits),
+            format!("{line_no:>digits$}", digits = state.digits),
             Style::default().fg(theme().muted).bg(line_bg),
         ),
         Span::styled(" │ ", Style::default().fg(theme().border).bg(line_bg)),
@@ -873,6 +917,21 @@ fn hard_wrap_word(word: &str, max_width: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
+}
+
+fn blend_color(base: Color, accent: Color, accent_percent: u8) -> Color {
+    debug_assert!(accent_percent <= 100);
+    match (base, accent) {
+        (Color::Rgb(br, bg, bb), Color::Rgb(ar, ag, ab)) => {
+            let p = u16::from(accent_percent);
+            let inv = 100_u16.saturating_sub(p);
+            let mix = |base_component: u8, accent_component: u8| -> u8 {
+                ((u16::from(base_component) * inv + u16::from(accent_component) * p) / 100) as u8
+            };
+            Color::Rgb(mix(br, ar), mix(bg, ag), mix(bb, ab))
+        }
+        _ => accent,
+    }
 }
 
 fn note_kind_label(kind: NoteKind) -> &'static str {
@@ -1104,5 +1163,31 @@ mod tests {
         assert!(rendered.contains("entry"));
         assert!(rendered.contains("why empty?"));
         assert_eq!(metrics.annotation_lines, vec![1]);
+    }
+
+    #[test]
+    fn ranged_annotations_render_at_their_end_line() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/main.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut packet = Packet::new(
+            "demo",
+            "Demo",
+            root.path().display().to_string(),
+            vec![TrackedFile::new("src/main.rs")],
+        );
+        packet.notes.push(Note::new(
+            "src/main.rs",
+            Anchor::new(1, Some(3)),
+            NoteKind::Flow,
+            "range note",
+            "covers the first block",
+            vec![],
+            None,
+            NoteSource::Agent,
+        ));
+        let app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
+        let (_, metrics) = build_source_lines(&app, 80);
+        assert_eq!(metrics.annotation_lines, vec![3]);
     }
 }

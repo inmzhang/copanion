@@ -144,6 +144,7 @@ fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
+        InputMode::Visual => handle_visual_mode(app, key),
         InputMode::Draft => handle_draft_mode(app, key),
         InputMode::DraftConfirm => handle_draft_confirm_mode(app, key),
         InputMode::FilePicker => handle_file_picker_mode(app, key),
@@ -174,6 +175,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char(']') => app.jump_to_next_annotation(),
         KeyCode::PageDown => app.page_down(),
         KeyCode::PageUp => app.page_up(),
+        KeyCode::Char('v') | KeyCode::Char('V') => app.enter_visual_mode(),
         KeyCode::Char('a') => app.begin_question(),
         KeyCode::Char('n') => app.begin_note(),
         KeyCode::Char('i') => app.begin_edit_current_annotation(false),
@@ -184,6 +186,26 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('s') => app.save()?,
         KeyCode::Char('y') => app.export_questions()?,
         KeyCode::Char('x') => app.save_and_quit()?,
+        KeyCode::Char('q') => app.request_quit(),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_visual_mode(app: &mut App, key: KeyEvent) -> Result<()> {
+    app.clear_message();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('v') | KeyCode::Char('V') => app.exit_visual_mode(),
+        KeyCode::Char('j') | KeyCode::Down => app.move_cursor(1),
+        KeyCode::Char('k') | KeyCode::Up => app.move_cursor(-1),
+        KeyCode::Char('g') => app.go_to_first_line(),
+        KeyCode::Char('G') => app.go_to_last_line(),
+        KeyCode::PageDown => app.page_down(),
+        KeyCode::PageUp => app.page_up(),
+        KeyCode::Char('[') => app.jump_to_previous_annotation(),
+        KeyCode::Char(']') => app.jump_to_next_annotation(),
+        KeyCode::Char('a') => app.begin_question(),
+        KeyCode::Char('n') => app.begin_note(),
         KeyCode::Char('q') => app.request_quit(),
         _ => {}
     }
@@ -291,6 +313,10 @@ fn handle_help_mode(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('n') => {
             app.input_mode = InputMode::Normal;
             app.begin_note();
+        }
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            app.input_mode = InputMode::Normal;
+            app.enter_visual_mode();
         }
         KeyCode::Char('i') => {
             app.input_mode = InputMode::Normal;

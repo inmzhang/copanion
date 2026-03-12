@@ -23,6 +23,7 @@ pub enum FocusPane {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum InputMode {
     Normal,
+    Visual,
     Draft,
     DraftConfirm,
     FilePicker,
@@ -114,6 +115,7 @@ pub struct App {
     pub draft: Option<PromptDraft>,
     pub file_picker: Option<FilePickerState>,
     pub search: Option<SearchState>,
+    pub visual_anchor: Option<usize>,
     pub view_metrics: ViewMetrics,
     pub message: Option<String>,
     pub should_quit: bool,
@@ -142,6 +144,7 @@ impl App {
             draft: None,
             file_picker: None,
             search: None,
+            visual_anchor: None,
             view_metrics: ViewMetrics::default(),
             message: None,
             should_quit: false,
@@ -284,6 +287,40 @@ impl App {
         self.begin_new_draft(DraftKind::Note);
     }
 
+    pub fn enter_visual_mode(&mut self) {
+        if self.files.is_empty() {
+            self.message = Some("add a tracked file before selecting a range".to_string());
+            return;
+        }
+        self.discard_guard = false;
+        self.focus = FocusPane::Source;
+        self.input_mode = InputMode::Visual;
+        self.visual_anchor = Some(self.cursor_line);
+        self.message =
+            Some("visual selection started; move the cursor and press a or n".to_string());
+    }
+
+    pub fn exit_visual_mode(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.visual_anchor = None;
+        self.message = Some("visual selection cleared".to_string());
+    }
+
+    pub fn visual_selection(&self) -> Option<Anchor> {
+        if self.input_mode != InputMode::Visual {
+            return None;
+        }
+        let anchor = self.visual_anchor?;
+        Some(anchor_from_lines(anchor, self.cursor_line))
+    }
+
+    pub fn is_line_in_visual_selection(&self, line: usize) -> bool {
+        let Some(anchor) = self.visual_selection() else {
+            return false;
+        };
+        anchor_contains_line(anchor, line)
+    }
+
     pub fn begin_edit_current_annotation(&mut self, prefer_note: bool) {
         if self.files.is_empty() {
             self.message = Some("add a tracked file before editing annotations".to_string());
@@ -338,6 +375,7 @@ impl App {
         };
 
         self.draft = Some(draft);
+        self.visual_anchor = None;
         self.input_mode = InputMode::Draft;
         self.message =
             Some("edit the annotation; Ctrl-S saves, Ctrl-O opens the external editor".to_string());
@@ -349,15 +387,13 @@ impl App {
             return;
         }
         self.discard_guard = false;
-        let anchor = Anchor::new(self.cursor_line, None);
+        let anchor = self.selected_anchor();
         let related_note_ids = if kind == DraftKind::Question {
-            self.notes_for_current_line()
-                .into_iter()
-                .map(|note| note.id.clone())
-                .collect()
+            self.related_note_ids_for_anchor(anchor)
         } else {
             Vec::new()
         };
+        self.visual_anchor = None;
         self.draft = Some(PromptDraft {
             kind,
             target: DraftTarget::New,
@@ -483,14 +519,14 @@ impl App {
             .iter()
             .map(|note| SearchMatch {
                 path: note.path.clone(),
-                line: note.anchor.start_line,
+                line: anchor_display_line(note.anchor),
                 label: format!("Note: {}", note.title),
                 preview: note.body.clone(),
             })
             .chain(self.packet.questions.iter().filter_map(|question| {
                 question.anchor.map(|anchor| SearchMatch {
                     path: question.path.clone(),
-                    line: anchor.start_line,
+                    line: anchor_display_line(anchor),
                     label: "Question".to_string(),
                     preview: question.prompt.clone(),
                 })
@@ -910,6 +946,19 @@ impl App {
         })
     }
 
+    fn selected_anchor(&self) -> Anchor {
+        self.visual_selection()
+            .unwrap_or_else(|| Anchor::new(self.cursor_line, None))
+    }
+
+    fn related_note_ids_for_anchor(&self, anchor: Anchor) -> Vec<String> {
+        self.notes_for_path(self.current_path())
+            .into_iter()
+            .filter(|note| anchors_overlap(note.anchor, anchor))
+            .map(|note| note.id.clone())
+            .collect()
+    }
+
     fn ensure_cursor_visible(&mut self) {
         if self.view_metrics.line_to_row.is_empty() {
             self.scroll = 0;
@@ -1144,16 +1193,36 @@ fn discover_workspace_files(root: &Path, packet: &Packet) -> Result<Vec<String>>
 }
 
 fn note_covers_line(note: &Note, line: usize) -> bool {
-    let end = note.anchor.end_line.unwrap_or(note.anchor.start_line);
-    line >= note.anchor.start_line && line <= end
+    anchor_contains_line(note.anchor, line)
 }
 
 fn question_covers_line(question: &Question, line: usize) -> bool {
     let Some(anchor) = question.anchor else {
         return false;
     };
+    anchor_contains_line(anchor, line)
+}
+
+pub(crate) fn anchor_contains_line(anchor: Anchor, line: usize) -> bool {
     let end = anchor.end_line.unwrap_or(anchor.start_line);
     line >= anchor.start_line && line <= end
+}
+
+fn anchors_overlap(left: Anchor, right: Anchor) -> bool {
+    let left_end = left.end_line.unwrap_or(left.start_line);
+    let right_end = right.end_line.unwrap_or(right.start_line);
+    left.start_line <= right_end && right.start_line <= left_end
+}
+
+fn anchor_from_lines(start: usize, end: usize) -> Anchor {
+    let start_line = start.min(end).max(1);
+    let end_line = start.max(end).max(1);
+    let maybe_end = (end_line != start_line).then_some(end_line);
+    Anchor::new(start_line, maybe_end)
+}
+
+pub(crate) fn anchor_display_line(anchor: Anchor) -> usize {
+    anchor.end_line.unwrap_or(anchor.start_line)
 }
 
 fn note_title_from_text(text: &str) -> String {
@@ -1238,6 +1307,10 @@ mod tests {
         assert_eq!(
             app.draft.as_ref().map(|draft| draft.kind),
             Some(DraftKind::Note)
+        );
+        assert_eq!(
+            app.draft.as_ref().map(|draft| draft.anchor),
+            Some(Anchor::new(1, None))
         );
     }
 
@@ -1372,5 +1445,57 @@ mod tests {
         assert!(app.commit_file_picker_selection());
         assert_eq!(app.files.len(), 1);
         assert_eq!(app.current_path(), "src/main.rs");
+    }
+
+    #[test]
+    fn visual_selection_creates_range_note_anchor() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.enter_visual_mode();
+        app.move_cursor(2);
+        app.begin_note();
+        let buffer = app.active_draft_buffer_mut();
+        buffer.text = "Range note".to_string();
+        buffer.cursor = buffer.text.len();
+        app.commit_draft().unwrap();
+        assert_eq!(app.packet.notes.len(), 1);
+        assert_eq!(app.packet.notes[0].anchor, Anchor::new(1, Some(3)));
+    }
+
+    #[test]
+    fn visual_selection_collects_related_notes_across_the_range() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let mut packet = Packet::new(
+            "tour",
+            "Tour",
+            temp.path().display().to_string(),
+            vec![TrackedFile::new("main.rs")],
+        );
+        packet.notes.push(Note::new(
+            "main.rs",
+            Anchor::new(2, Some(3)),
+            NoteKind::Overview,
+            "shared range",
+            "This overlaps the selected range.",
+            vec![],
+            None,
+            NoteSource::Agent,
+        ));
+        let note_id = packet.notes[0].id.clone();
+        let mut app = App::load(temp.path().join("tour.toml"), packet, false).unwrap();
+        app.enter_visual_mode();
+        app.move_cursor(2);
+        app.begin_question();
+        let draft = app.draft.as_ref().expect("question draft should exist");
+        assert_eq!(draft.anchor, Anchor::new(1, Some(3)));
+        assert_eq!(draft.related_note_ids, vec![note_id]);
     }
 }

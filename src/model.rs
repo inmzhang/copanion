@@ -63,7 +63,7 @@ pub struct Question {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Anchor {
     pub start_line: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
