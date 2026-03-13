@@ -12,8 +12,8 @@
 - `cargo clippy --all-targets --all-features -- -D warnings`: treat warnings as errors, matching CI and pre-push hooks.
 - `cargo test --all-features`: run the full unit-test suite.
 - `cargo publish --dry-run`: optional release sanity check used in CI.
-- `python3 scripts/generate_changelog.py --output CHANGELOG.md`: regenerate the changelog from conventional-commit history.
-- `pre-commit install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg`: install the local formatting, test, and conventional-commit hooks.
+- `git-cliff --output CHANGELOG.md`: regenerate the changelog from conventional-commit history when you need a local preview of the CI-generated file.
+- `pre-commit install --install-hooks`: install the configured formatting, test, and conventional-commit hooks, including the `compilerla/conventional-pre-commit` `commit-msg` hook.
 
 ## Coding Style & Naming Conventions
 
