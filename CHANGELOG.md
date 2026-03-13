@@ -1,15 +1,17 @@
 # Changelog
 
 All notable changes to `copanion` will be recorded here.
-## 0.1.1 - 2026-03-13
+## 0.1.2 - 2026-03-13
 ### Chores
 - Enforce conventional commits and git-cliff changelog
 - Use compilerla conventional pre-commit
+- Prepare v0.1.1
 
 
 
 ### Ci
 - Require manual release dispatch
+- Auto-tag merged release prs
 
 
 
@@ -22,6 +24,9 @@ All notable changes to `copanion` will be recorded here.
 - Revert "ci(release): require manual release dispatch"
 
 This reverts commit 13a44af56113a7772c6f85ea718726818296547f.
+- Merge pull request #2 from inmzhang/release/v0.1.1
+
+release: v0.1.1
 
 ## 0.1.0 - 2026-03-12
 ### Chores
