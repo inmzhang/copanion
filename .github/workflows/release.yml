@@ -4,14 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Release action to perform"
+        description: "Release bump to prepare"
         required: true
         type: choice
         options:
           - bump-patch
           - bump-minor
           - bump-major
-          - publish
+  push:
+    tags:
+      - "v*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,7 +21,7 @@ env:
 jobs:
   create-release-pr:
     name: Create Release PR
-    if: startsWith(github.event.inputs.action, 'bump-')
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -90,11 +92,11 @@ jobs:
             - regenerate `Cargo.lock`
             - regenerate `CHANGELOG.md` with `git-cliff`
 
-            After this PR is merged, run the `Release` workflow again on `master` with `action=publish`.
+            After this PR is merged, create and push tag `v${{ steps.new.outputs.version }}` to trigger publish.
 
   publish:
     name: Publish Release
-    if: github.event.inputs.action == 'publish'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -112,11 +114,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Get release version
+      - name: Get version from tag
         id: tag
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Cargo.toml matches tag
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          test "$VERSION" = "${{ steps.tag.outputs.version }}"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -132,24 +139,12 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Create and push release tag
-        run: |
-          TAG="v${{ steps.tag.outputs.version }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "tag $TAG already exists"
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "$TAG"
-          git push origin "$TAG"
-
       - name: Generate release notes
         run: git-cliff --current --strip header --output RELEASE_NOTES.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.tag.outputs.version }}
-          name: v${{ steps.tag.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
