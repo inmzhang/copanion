@@ -29,6 +29,7 @@ pub enum InputMode {
     Visual,
     Draft,
     DraftConfirm,
+    ThreadView,
     FilePicker,
     Search,
     Help,
@@ -98,6 +99,14 @@ pub struct SearchState {
     pub candidates: Vec<SearchMatch>,
     pub matches: Vec<SearchMatch>,
     pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThreadViewState {
+    pub question_index: usize,
+    pub scroll: usize,
+    pub total_rows: usize,
+    pub viewport_height: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -193,6 +202,7 @@ pub struct App {
     pub draft: Option<PromptDraft>,
     pub file_picker: Option<FilePickerState>,
     pub search: Option<SearchState>,
+    pub thread_view: Option<ThreadViewState>,
     pub visual_anchor: Option<usize>,
     pub view_metrics: ViewMetrics,
     pub browser_mode: BrowserMode,
@@ -249,6 +259,7 @@ impl App {
             draft: None,
             file_picker: None,
             search: None,
+            thread_view: None,
             visual_anchor: None,
             view_metrics: ViewMetrics::default(),
             browser_mode: BrowserMode::Source,
@@ -1679,6 +1690,119 @@ impl App {
             .and_then(|index| self.packet.questions.get(index))
     }
 
+    pub fn active_thread_view_question(&self) -> Option<&Question> {
+        self.thread_view
+            .as_ref()
+            .and_then(|view| self.packet.questions.get(view.question_index))
+    }
+
+    pub fn open_current_thread_viewer(&mut self) -> bool {
+        let Some(index) = self.current_question_index() else {
+            self.message = Some(if self.is_diff_mode() {
+                "there is no comment thread on the current line".to_string()
+            } else {
+                "there is no question thread on the current line".to_string()
+            });
+            return false;
+        };
+        self.thread_view = Some(ThreadViewState {
+            question_index: index,
+            scroll: usize::MAX,
+            total_rows: 0,
+            viewport_height: 1,
+        });
+        self.input_mode = InputMode::ThreadView;
+        self.message = Some(if self.is_diff_mode() {
+            "readonly comment thread view; j/k scroll, Esc closes".to_string()
+        } else {
+            "readonly question thread view; j/k scroll, Esc closes".to_string()
+        });
+        true
+    }
+
+    pub fn close_thread_viewer(&mut self) {
+        self.thread_view = None;
+        self.input_mode = InputMode::Normal;
+        self.message = Some(if self.is_diff_mode() {
+            "closed the comment thread view".to_string()
+        } else {
+            "closed the question thread view".to_string()
+        });
+    }
+
+    pub fn update_thread_view_metrics(&mut self, total_rows: usize, viewport_height: usize) {
+        let Some(view) = &mut self.thread_view else {
+            return;
+        };
+        view.total_rows = total_rows;
+        view.viewport_height = viewport_height.max(1);
+        let max_scroll = view.total_rows.saturating_sub(view.viewport_height);
+        view.scroll = view.scroll.min(max_scroll);
+    }
+
+    pub fn thread_view_scroll(&self) -> usize {
+        self.thread_view
+            .as_ref()
+            .map(|view| view.scroll)
+            .unwrap_or(0)
+    }
+
+    pub fn scroll_thread_view(&mut self, delta: isize) {
+        let Some(view) = &mut self.thread_view else {
+            return;
+        };
+        let max_scroll = view.total_rows.saturating_sub(view.viewport_height) as isize;
+        view.scroll = (view.scroll as isize + delta).clamp(0, max_scroll) as usize;
+    }
+
+    pub fn page_thread_view_down(&mut self) {
+        let step = self
+            .thread_view
+            .as_ref()
+            .map(|view| view.viewport_height.max(1))
+            .unwrap_or(1);
+        self.scroll_thread_view(step as isize);
+    }
+
+    pub fn page_thread_view_up(&mut self) {
+        let step = self
+            .thread_view
+            .as_ref()
+            .map(|view| view.viewport_height.max(1))
+            .unwrap_or(1);
+        self.scroll_thread_view(-(step as isize));
+    }
+
+    pub fn half_page_thread_view_down(&mut self) {
+        let step = self
+            .thread_view
+            .as_ref()
+            .map(|view| (view.viewport_height / 2).max(1))
+            .unwrap_or(1);
+        self.scroll_thread_view(step as isize);
+    }
+
+    pub fn half_page_thread_view_up(&mut self) {
+        let step = self
+            .thread_view
+            .as_ref()
+            .map(|view| (view.viewport_height / 2).max(1))
+            .unwrap_or(1);
+        self.scroll_thread_view(-(step as isize));
+    }
+
+    pub fn thread_view_to_top(&mut self) {
+        if let Some(view) = &mut self.thread_view {
+            view.scroll = 0;
+        }
+    }
+
+    pub fn thread_view_to_bottom(&mut self) {
+        if let Some(view) = &mut self.thread_view {
+            view.scroll = view.total_rows.saturating_sub(view.viewport_height);
+        }
+    }
+
     pub fn notes_for_current_line(&self) -> Vec<&Note> {
         let Some((path, line)) = self.current_annotation_target() else {
             return Vec::new();
@@ -2915,6 +3039,46 @@ mod tests {
         let draft = app.draft.as_ref().expect("question draft should exist");
         assert_eq!(draft.target, DraftTarget::ContinueQuestion { index: 0 });
         assert_eq!(app.input_mode, InputMode::Draft);
+    }
+
+    #[test]
+    fn can_open_question_in_readonly_thread_view() {
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            let mut question = Question::new(
+                "main.rs",
+                Some(Anchor::new(2, None)),
+                "Why is this separate?",
+                None,
+                vec![],
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::Agent,
+                "It separates setup from the hot path.",
+            );
+            question.add_message(
+                crate::model::QuestionMessageRole::User,
+                "What invariant depends on that split?",
+            );
+            packet.questions.push(question);
+        });
+        app.cursor_line = 2;
+
+        assert!(app.open_current_thread_viewer());
+        assert_eq!(app.input_mode, InputMode::ThreadView);
+        assert_eq!(
+            app.active_thread_view_question()
+                .map(|question| question.prompt.as_str()),
+            Some("Why is this separate?")
+        );
+
+        app.update_thread_view_metrics(20, 6);
+        assert_eq!(app.thread_view_scroll(), 14);
+        app.scroll_thread_view(-3);
+        assert_eq!(app.thread_view_scroll(), 11);
+
+        app.close_thread_viewer();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.thread_view.is_none());
     }
 
     #[test]

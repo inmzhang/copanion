@@ -9,7 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::diff::{DiffFile, DiffLine, LineOrigin, calculate_gap};
 use crate::model::{
-    Note, NoteKind, NoteSource, Question, QuestionMessage, QuestionMessageRole, QuestionStatus,
+    Note, NoteKind, NoteSource, Question, QuestionStatus, QuestionTurnKind, QuestionTurnRef,
 };
 use crate::theme::{self, Theme};
 
@@ -59,6 +59,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             render_draft(frame, app, sections[1]);
             render_draft_confirm(frame, sections[1]);
         }
+        InputMode::ThreadView => render_thread_view(frame, app, sections[1]),
         InputMode::FilePicker => render_file_picker(frame, app, sections[1]),
         InputMode::Search => render_search(frame, app, sections[1]),
         InputMode::Normal | InputMode::Visual | InputMode::CommitSelect => {}
@@ -482,14 +483,14 @@ fn render_diff_status(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::CommitSelect => "j/k move  Space toggle range  Enter open diff  q quit",
         InputMode::Help => "q or Esc closes help",
         InputMode::Normal if app.current_open_question().is_some() => {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  Esc/m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space view thread  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Normal
             if app
                 .current_question()
                 .is_some_and(|question| question.status != QuestionStatus::Open) =>
         {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  Esc/m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space view thread  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Normal => {
             "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  n note  i edit  / search  r review+next  Esc/m commits"
@@ -497,6 +498,9 @@ fn render_diff_status(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::Visual => "j/k move  a comment  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
         InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
+        InputMode::ThreadView => {
+            "j/k scroll  Ctrl-U/Ctrl-D half-page  PageUp/PageDown page  Enter/Esc close"
+        }
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
         InputMode::Search => {
             "Type to fuzzy-search review notes and comment threads  Enter jump  j/k move  Esc cancel"
@@ -544,21 +548,24 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_default();
     let hints = match app.input_mode {
         InputMode::Normal if app.current_open_question().is_some() => {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  c close  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  Enter/Space view  v select  dd delete  a ask or continue  c close  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Normal
             if app
                 .current_question()
                 .is_some_and(|question| question.status != QuestionStatus::Open) =>
         {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  o reopen  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  Enter/Space view  v select  dd delete  a ask or continue  o reopen  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Normal => {
-            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  Enter/Space view  v select  dd delete  a ask or continue  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Visual => "j/k move  a question  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
         InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
+        InputMode::ThreadView => {
+            "j/k scroll  Ctrl-U/Ctrl-D half-page  PageUp/PageDown page  Enter/Esc close"
+        }
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
         InputMode::Search => {
             "Type to fuzzy-search notes and questions  Enter jump  j/k move  Esc cancel"
@@ -703,6 +710,10 @@ fn render_help(frame: &mut Frame, area: Rect) {
         help_line("Ctrl-U / Ctrl-D", "move by half a viewport"),
         help_line("v / V", "start a visual selection on anchorable lines"),
         help_line("a", "open or continue the thread under the cursor"),
+        help_line(
+            "Enter / Space",
+            "open the thread under the cursor in a readonly viewer",
+        ),
         help_line("c", "close the open thread under the cursor"),
         help_line("o", "reopen the closed thread under the cursor"),
         help_line("n", "open a NOTE draft at the cursor or selected range"),
@@ -889,6 +900,96 @@ fn render_draft_confirm(frame: &mut Frame, area: Rect) {
             .style(Style::default().bg(theme().panel))
             .wrap(Wrap { trim: false }),
         inner,
+    );
+}
+
+fn render_thread_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(question) = app.active_thread_view_question() else {
+        return;
+    };
+    let popup = centered_rect(area, 84, 82);
+    frame.render_widget(Clear, popup);
+    let (border_color, _) = question_status_style(question.status);
+    let block = Block::default()
+        .title(if app.is_diff_mode() {
+            " Comment Thread "
+        } else {
+            " Question Thread "
+        })
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme().panel).fg(theme().text))
+        .border_style(Style::default().fg(border_color));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let anchor = question
+        .anchor
+        .map(|anchor| anchor.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let summary = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("File: ", Style::default().fg(theme().muted)),
+            Span::styled(question.path.as_str(), Style::default().fg(theme().text)),
+            Span::raw("  "),
+            Span::styled("Anchor: ", Style::default().fg(theme().muted)),
+            Span::styled(anchor, Style::default().fg(theme().text)),
+        ]),
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(theme().muted)),
+            Span::styled(
+                question_status_label(question.status),
+                Style::default().fg(theme().accent),
+            ),
+            Span::raw("  "),
+            Span::styled("Turns: ", Style::default().fg(theme().muted)),
+            Span::styled(
+                question.turn_count().to_string(),
+                Style::default().fg(theme().text),
+            ),
+        ]),
+    ])
+    .style(Style::default().bg(theme().panel));
+    frame.render_widget(summary, sections[0]);
+
+    let lines = render_question_thread(
+        question,
+        sections[1].width.max(20) as usize,
+        app.is_diff_mode(),
+        false,
+    );
+    app.update_thread_view_metrics(lines.len(), sections[1].height as usize);
+    let visible = lines
+        .into_iter()
+        .skip(app.thread_view_scroll())
+        .take(sections[1].height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(visible).style(Style::default().bg(theme().panel)),
+        sections[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("j/k", Style::default().fg(theme().accent)),
+            Span::raw(" scroll  "),
+            Span::styled("Ctrl-U/D", Style::default().fg(theme().accent)),
+            Span::raw(" half-page  "),
+            Span::styled("PgUp/PgDn", Style::default().fg(theme().accent)),
+            Span::raw(" page  "),
+            Span::styled("Enter/Esc", Style::default().fg(theme().danger)),
+            Span::raw(" close"),
+        ]))
+        .style(Style::default().bg(theme().panel)),
+        sections[2],
     );
 }
 
@@ -1637,9 +1738,18 @@ fn render_question_card(
     width: usize,
     comment_mode: bool,
 ) -> Vec<Line<'static>> {
+    render_question_thread(question, width, comment_mode, true)
+}
+
+fn render_question_thread(
+    question: &Question,
+    width: usize,
+    comment_mode: bool,
+    show_actions: bool,
+) -> Vec<Line<'static>> {
     let (border_color, background) = question_status_style(question.status);
     let status = question_status_label(question.status);
-    let reply_count = question.conversation.len();
+    let turn_count = question.turn_count();
     let thread_kind = if comment_mode {
         "comment thread"
     } else {
@@ -1649,46 +1759,53 @@ fn render_question_card(
         .anchor
         .map(|anchor| {
             format!(
-                "{} {} · line {} · {} message{}",
+                "{} {} · line {} · {} turn{}",
                 status,
                 thread_kind,
                 anchor,
-                reply_count,
-                if reply_count == 1 { "" } else { "s" }
+                turn_count,
+                if turn_count == 1 { "" } else { "s" }
             )
         })
         .unwrap_or_else(|| format!("{status} {thread_kind}"));
-    let mut lines = render_card(
-        if comment_mode { "Comment" } else { "Question" },
-        &title,
-        &question.prompt,
-        question.related_note_ids.as_slice(),
-        width,
-        border_color,
-        background,
-    );
-    lines.insert(
-        0,
-        Line::from(vec![
-            Span::styled("  ", Style::default().bg(theme().panel)),
-            Span::styled("╭─ ", Style::default().fg(border_color).bg(background)),
-            Span::styled(
-                question_status_header(question.status, comment_mode),
-                Style::default()
-                    .fg(theme().text)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {title}"),
-                Style::default().fg(theme().muted).bg(background),
-            ),
-        ]),
-    );
-    for message in &question.conversation {
-        lines.extend(render_question_message_card(message, width, comment_mode));
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  ", Style::default().bg(theme().panel)),
+        Span::styled("╭─ ", Style::default().fg(border_color).bg(background)),
+        Span::styled(
+            question_status_header(question.status, comment_mode),
+            Style::default()
+                .fg(theme().text)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {title}"),
+            Style::default().fg(theme().muted).bg(background),
+        ),
+    ])];
+    if let Some(why) = &question.why {
+        lines.push(render_thread_meta_line(
+            border_color,
+            background,
+            format!("Why unclear: {why}"),
+        ));
     }
-    if question.status == QuestionStatus::Open {
+    if !question.related_note_ids.is_empty() {
+        lines.push(render_thread_meta_line(
+            border_color,
+            background,
+            format!("Linked notes: {}", question.related_note_ids.join(", ")),
+        ));
+    }
+    for turn in question.turns() {
+        lines.extend(render_question_turn_card(
+            turn,
+            question.status,
+            width,
+            comment_mode,
+        ));
+    }
+    if show_actions && question.status == QuestionStatus::Open {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled(
@@ -1706,7 +1823,7 @@ fn render_question_card(
                 Style::default().fg(theme().muted).bg(theme().panel),
             ),
         ]));
-    } else {
+    } else if show_actions {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().bg(theme().panel)),
             Span::styled(
@@ -1722,16 +1839,25 @@ fn render_question_card(
     lines
 }
 
-fn render_question_message_card(
-    message: &QuestionMessage,
+fn render_thread_meta_line(border_color: Color, background: Color, text: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ", Style::default().bg(theme().panel)),
+        Span::styled("│ ", Style::default().fg(border_color).bg(background)),
+        Span::styled(text, Style::default().fg(theme().muted).bg(background)),
+    ])
+}
+
+fn render_question_turn_card(
+    turn: QuestionTurnRef<'_>,
+    question_status: QuestionStatus,
     width: usize,
     comment_mode: bool,
 ) -> Vec<Line<'static>> {
-    let (border_color, background) = question_message_style(message.role);
+    let (border_color, background) = question_turn_style(turn.kind, question_status);
     render_card(
-        message.role.label(),
-        message_role_subtitle(message.role, comment_mode),
-        &message.body,
+        question_turn_label(turn.kind, comment_mode),
+        question_turn_subtitle(turn.kind, comment_mode),
+        turn.body,
         &[],
         width,
         border_color,
@@ -1898,29 +2024,38 @@ fn question_status_label(status: QuestionStatus) -> &'static str {
     }
 }
 
-fn question_message_style(role: QuestionMessageRole) -> (Color, Color) {
-    match role {
-        QuestionMessageRole::User => (
+fn question_turn_style(kind: QuestionTurnKind, status: QuestionStatus) -> (Color, Color) {
+    match kind {
+        QuestionTurnKind::Prompt => question_status_style(status),
+        QuestionTurnKind::UserFollowUp => (
             theme().border_focus,
             blend_color(theme().panel, theme().border_focus, 12),
         ),
-        QuestionMessageRole::Agent => (
+        QuestionTurnKind::AgentReply => (
             theme().accent,
             blend_color(theme().panel, theme().accent, 12),
         ),
     }
 }
 
-fn message_role_subtitle(role: QuestionMessageRole, comment_mode: bool) -> &'static str {
-    if comment_mode {
-        return match role {
-            QuestionMessageRole::User => "comment reply",
-            QuestionMessageRole::Agent => "agent reply",
-        };
+fn question_turn_label(kind: QuestionTurnKind, comment_mode: bool) -> &'static str {
+    match (kind, comment_mode) {
+        (QuestionTurnKind::Prompt, true) => "Comment",
+        (QuestionTurnKind::Prompt, false) => "Question",
+        (QuestionTurnKind::UserFollowUp, true) => "Reply",
+        (QuestionTurnKind::UserFollowUp, false) => "Follow-up",
+        (QuestionTurnKind::AgentReply, _) => "Agent Reply",
     }
-    match role {
-        QuestionMessageRole::User => "user follow-up",
-        QuestionMessageRole::Agent => "agent answer",
+}
+
+fn question_turn_subtitle(kind: QuestionTurnKind, comment_mode: bool) -> &'static str {
+    match (kind, comment_mode) {
+        (QuestionTurnKind::Prompt, true) => "original comment",
+        (QuestionTurnKind::Prompt, false) => "original question",
+        (QuestionTurnKind::UserFollowUp, true) => "comment reply",
+        (QuestionTurnKind::UserFollowUp, false) => "user follow-up",
+        (QuestionTurnKind::AgentReply, true) => "agent reply",
+        (QuestionTurnKind::AgentReply, false) => "agent answer",
     }
 }
 
@@ -2160,6 +2295,13 @@ fn status_mode_label(app: &App) -> String {
                 DraftKind::Note => "note".to_string(),
             })
             .unwrap_or_else(|| "draft".to_string()),
+        InputMode::ThreadView => {
+            if app.is_diff_mode() {
+                "thread".to_string()
+            } else {
+                "question".to_string()
+            }
+        }
         InputMode::FilePicker => "files".to_string(),
         InputMode::Search => "search".to_string(),
         InputMode::Help => "help".to_string(),
@@ -2218,6 +2360,43 @@ mod tests {
         assert!(rendered.contains("entry"));
         assert!(rendered.contains("why empty?"));
         assert_eq!(metrics.annotation_lines, vec![1]);
+    }
+
+    #[test]
+    fn question_cards_render_the_full_thread_in_order() {
+        let mut question = Question::new(
+            "src/main.rs",
+            Some(Anchor::new(11, None)),
+            "Why is this branch separate?",
+            None,
+            vec![],
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::Agent,
+            "It keeps startup work off the fast path.",
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::User,
+            "What invariant depends on that split?",
+        );
+        question.add_message(
+            crate::model::QuestionMessageRole::Agent,
+            "The fast path assumes setup already validated the inputs.",
+        );
+
+        let rendered = super::render_question_thread(&question, 80, false, false)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("4 turns"));
+        assert!(rendered.contains("Question · original question"));
+        assert!(rendered.contains("Follow-up · user follow-up"));
+        assert!(rendered.contains("Agent Reply · agent answer"));
+        assert!(rendered.contains("Why is this branch separate?"));
+        assert!(rendered.contains("What invariant depends on that split?"));
+        assert!(rendered.contains("The fast path assumes setup already validated the inputs."));
     }
 
     #[test]
