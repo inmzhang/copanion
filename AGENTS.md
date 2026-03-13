@@ -12,6 +12,8 @@
 - `cargo clippy --all-targets --all-features -- -D warnings`: treat warnings as errors, matching CI and pre-push hooks.
 - `cargo test --all-features`: run the full unit-test suite.
 - `cargo publish --dry-run`: optional release sanity check used in CI.
+- `python3 scripts/generate_changelog.py --output CHANGELOG.md`: regenerate the changelog from conventional-commit history.
+- `pre-commit install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg`: install the local formatting, test, and conventional-commit hooks.
 
 ## Coding Style & Naming Conventions
 
@@ -23,4 +25,8 @@ Tests are inline under `#[cfg(test)]` beside the code they verify; there is no s
 
 ## Commit & Pull Request Guidelines
 
-Recent history mixes short imperative subjects with conventional prefixes such as `feat(tui):`, `ci:`, `docs(skills):`, and `chore:`. Follow that style: concise, present-tense subjects scoped when useful. PRs should explain user-visible behavior changes, list validation commands run, and call out any README, demo GIF/tape, or agent-skill updates. Include screenshots or terminal captures for material TUI changes.
+Use Conventional Commits for all new history. The required subject format is `type(scope): description` or `type: description`, with concise present-tense wording and an optional narrow scope such as `tui`, `diff`, `skills`, or `release`. Preferred types are `feat`, `fix`, `refactor`, `docs`, `ci`, `chore`, `test`, `build`, `perf`, `style`, and `revert`.
+
+`git-cliff` release notes and `CHANGELOG.md` generation assume conventional commit subjects, so do not fall back to free-form imperative messages.
+
+PRs should explain user-visible behavior changes, list validation commands run, and call out any README, demo GIF/tape, or agent-skill updates. Include screenshots or terminal captures for material TUI changes.

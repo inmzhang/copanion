@@ -1,6 +1,16 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Release bump to prepare"
+        required: true
+        type: choice
+        options:
+          - bump-patch
+          - bump-minor
+          - bump-major
   push:
     tags:
       - "v*"
@@ -9,13 +19,89 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  create-release-pr:
+    name: Create Release PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@git-cliff
+
+      - name: Get current version
+        id: current
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Calculate new version
+        id: new
+        run: |
+          IFS='.' read -r major minor patch <<< "${{ steps.current.outputs.version }}"
+          case "${{ github.event.inputs.action }}" in
+            bump-major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            bump-minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            bump-patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+          NEW_VERSION="${major}.${minor}.${patch}"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${{ steps.current.outputs.version }} -> $NEW_VERSION"
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.new.outputs.version }}"/' Cargo.toml
+
+      - name: Update Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Generate changelog
+        run: |
+          python3 scripts/generate_changelog.py --tag "v${{ steps.new.outputs.version }}" --output CHANGELOG.md
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore(release): prepare v${{ steps.new.outputs.version }}"
+          branch: release/v${{ steps.new.outputs.version }}
+          title: "release: v${{ steps.new.outputs.version }}"
+          body: |
+            Prepares v${{ steps.new.outputs.version }} from ${{ steps.current.outputs.version }}.
+
+            Included updates:
+            - bump `Cargo.toml` to v${{ steps.new.outputs.version }}
+            - regenerate `Cargo.lock`
+            - regenerate `CHANGELOG.md` with `git-cliff`
+
+            After this PR is merged, create and push tag `v${{ steps.new.outputs.version }}` to trigger publish.
+
   publish:
     name: Publish Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@git-cliff
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,9 +134,12 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      - name: Generate release notes
+        run: git-cliff --current --strip header --output RELEASE_NOTES.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md

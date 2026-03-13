@@ -14,11 +14,12 @@ body = """
 {% for group, commits in commits | group_by(attribute="group") -%}
 ### {{ group | upper_first }}
 {% for commit in commits -%}
-- {{ commit.message | upper_first }} ({{ commit.id | truncate(length=7, end="") }})
+- {{ commit.message | upper_first }}
 {% endfor %}
+{% if not loop.last %}
 
-{% endfor -%}
-"""
+{% endif -%}
+{% endfor %}"""
 trim = true
 
 [git]
@@ -42,8 +43,28 @@ message = "^docs"
 group = "docs"
 
 [[git.commit_parsers]]
+message = "^ci"
+group = "ci"
+
+[[git.commit_parsers]]
 message = "^chore"
 group = "chores"
+
+[[git.commit_parsers]]
+message = "^test"
+group = "tests"
+
+[[git.commit_parsers]]
+message = "^build"
+group = "build"
+
+[[git.commit_parsers]]
+message = "^perf"
+group = "performance"
+
+[[git.commit_parsers]]
+message = "^style"
+group = "style"
 
 [[git.commit_parsers]]
 message = ".*"
