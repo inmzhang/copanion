@@ -73,7 +73,13 @@ jobs:
 
       - name: Generate changelog
         run: |
-          git-cliff --tag "v${{ steps.new.outputs.version }}" --output CHANGELOG.md
+          PREV_TAG="v${{ steps.current.outputs.version }}"
+          NEXT_TAG="v${{ steps.new.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$PREV_TAG" >/dev/null; then
+            git-cliff "$PREV_TAG..HEAD" --tag "$NEXT_TAG" --output CHANGELOG.md
+          else
+            git-cliff --tag "$NEXT_TAG" --output CHANGELOG.md
+          fi
           python3 - <<'PY'
           from pathlib import Path
           path = Path("CHANGELOG.md")
