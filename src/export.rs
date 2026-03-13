@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use crate::diff::{CommitInfo, DiffSelection};
-use crate::model::{Anchor, Note, Packet, Question, QuestionMessage, QuestionMessageRole};
+use crate::model::{Anchor, Packet, Question, QuestionTurnKind};
 
 #[derive(Debug, Clone)]
 pub struct ReviewExportContext {
@@ -37,7 +37,6 @@ pub fn generate_question_export(packet: &Packet, packet_path: &Path) -> Result<S
             .iter()
             .map(|file| Cow::Borrowed(file.path.as_str())),
     );
-    write_notes_section(&mut output, &packet.notes);
     write_questions_section(&mut output, "Questions", &open_questions, true);
 
     Ok(output)
@@ -92,10 +91,6 @@ pub fn generate_review_question_export(
     Ok(output)
 }
 
-pub fn summarize_note(note: &Note) -> String {
-    format!("[{}:{}] {}", note.path, note.anchor, note.title)
-}
-
 fn format_anchor(anchor: Option<Anchor>) -> String {
     match anchor {
         Some(anchor) => format!(":{}", anchor),
@@ -103,10 +98,11 @@ fn format_anchor(anchor: Option<Anchor>) -> String {
     }
 }
 
-fn conversation_role_label(role: QuestionMessageRole) -> &'static str {
-    match role {
-        QuestionMessageRole::User => "user",
-        QuestionMessageRole::Agent => "agent",
+fn thread_turn_label(kind: QuestionTurnKind) -> &'static str {
+    match kind {
+        QuestionTurnKind::Prompt => "user",
+        QuestionTurnKind::UserFollowUp => "user",
+        QuestionTurnKind::AgentReply => "agent",
     }
 }
 
@@ -157,27 +153,6 @@ fn write_path_section<'a>(
     output.push('\n');
 }
 
-fn write_notes_section(output: &mut String, notes: &[Note]) {
-    output.push_str("Existing guidance notes:\n");
-    if notes.is_empty() {
-        output.push_str("- none yet\n\n");
-        return;
-    }
-
-    for note in notes {
-        output.push_str(&format!(
-            "- [{}:{}] {} ({:?}, {:?})\n",
-            note.path, note.anchor, note.title, note.kind, note.source
-        ));
-        for line in note.body.lines() {
-            output.push_str("  ");
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    output.push('\n');
-}
-
 fn write_questions_section(
     output: &mut String,
     title: &str,
@@ -199,36 +174,26 @@ fn write_question(
     include_note_context: bool,
 ) {
     output.push_str(&format!(
-        "{index}. id={} [{}{}] {}\n",
+        "{index}. id={} [{}{}] {} turn{}\n",
         question.id,
         question.path,
         format_anchor(question.anchor),
-        question.prompt
+        question.turn_count(),
+        if question.turn_count() == 1 { "" } else { "s" }
     ));
-    if include_note_context {
-        if let Some(why) = &question.why {
-            output.push_str(&format!("   Why unclear: {why}\n"));
-        }
-        if !question.related_note_ids.is_empty() {
-            output.push_str(&format!(
-                "   Related notes: {}\n",
-                question.related_note_ids.join(", ")
-            ));
-        }
+    if include_note_context && let Some(why) = &question.why {
+        output.push_str(&format!("   Why unclear: {why}\n"));
     }
-    write_conversation(output, &question.conversation);
+    write_thread(output, question);
 }
 
-fn write_conversation(output: &mut String, messages: &[QuestionMessage]) {
-    if messages.is_empty() {
-        return;
-    }
-    output.push_str("   Conversation so far:\n");
-    for message in messages {
+fn write_thread(output: &mut String, question: &Question) {
+    output.push_str("   Thread:\n");
+    for turn in question.turns() {
         output.push_str(&format!(
             "   - {}: {}\n",
-            conversation_role_label(message.role),
-            message.body.replace('\n', "\n     ")
+            thread_turn_label(turn.kind),
+            turn.body.replace('\n', "\n     ")
         ));
     }
 }
@@ -248,10 +213,7 @@ mod tests {
     use crate::diff::{CommitInfo, DiffSelection};
     use crate::model::{Anchor, Note, NoteKind, NoteSource, Packet, Question, QuestionMessageRole};
 
-    use super::{
-        ReviewExportContext, generate_question_export, generate_review_question_export,
-        summarize_note,
-    };
+    use super::{ReviewExportContext, generate_question_export, generate_review_question_export};
 
     #[test]
     fn export_requires_questions_waiting_for_reply() {
@@ -272,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn export_includes_notes_and_question_ids_without_embedding_write_back_command() {
+    fn export_omits_notes_and_preserves_thread_order() {
         let mut packet = Packet::new("tour", "Tour", "/repo", vec![]);
         packet.notes.push(Note::new(
             "src/main.rs",
@@ -292,6 +254,10 @@ mod tests {
             vec![packet.notes[0].id.clone()],
         );
         question.add_message(
+            QuestionMessageRole::Agent,
+            "The flow explains the setup, but not the design tradeoff.",
+        );
+        question.add_message(
             QuestionMessageRole::User,
             "I still do not understand the invariant behind the split.",
         );
@@ -299,10 +265,19 @@ mod tests {
         packet.questions.push(question);
 
         let export = generate_question_export(&packet, Path::new("/tmp/packet.toml")).unwrap();
-        assert!(export.contains("Startup path"));
         assert!(export.contains(&question_id));
         assert!(!export.contains("copanion --apply-agent-response -"));
-        assert!(summarize_note(&packet.notes[0]).contains("src/main.rs:10-12"));
+        assert!(!export.contains("Existing guidance notes"));
+        assert!(!export.contains("Startup path"));
+        assert!(!export.contains("Control reaches this branch after argument parsing."));
+        assert!(export.contains("Thread:"));
+        assert!(export.contains("- user: Why is this branch separate from the fast path?"));
+        assert!(
+            export.contains("- agent: The flow explains the setup, but not the design tradeoff.")
+        );
+        assert!(
+            export.contains("- user: I still do not understand the invariant behind the split.")
+        );
     }
 
     #[test]
