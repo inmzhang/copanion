@@ -1,9 +1,15 @@
 # Changelog
 
 All notable changes to `copanion` will be recorded here.
-## Unreleased
+## 0.2.0 - 2026-03-13
 ### Chores
 - Enforce conventional commits and git-cliff changelog
+- Use compilerla conventional pre-commit
+
+
+
+### Ci
+- Require manual release dispatch
 
 
 
