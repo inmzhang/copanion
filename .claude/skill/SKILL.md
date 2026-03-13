@@ -48,6 +48,32 @@ python <skill-directory>/scripts/apply_session_plan.py \
   --plan /tmp/copanion-plan.json
 ```
 
+- Common helper flags:
+  - `--plan PATH` required. Pass `-` to read the JSON plan from stdin.
+  - `--repo-root PATH` optional. Defaults to the current directory.
+  - `--title TEXT` optional. Overrides `plan.title` when both are present.
+  - `--fresh` optional. Resets the packet first while preserving tracked files through Copanion.
+- Minimal plan shape:
+
+```json
+{
+  "title": "CLI tour",
+  "files": ["src/cli.rs"],
+  "notes": [
+    {
+      "path": "src/cli.rs",
+      "start_line": 41,
+      "kind": "flow",
+      "title": "CLI boot sequence",
+      "body": "Argument parsing, packet loading, export mode, and TUI dispatch meet here."
+    }
+  ],
+  "questions": []
+}
+```
+
+- Use `notes` for durable anchored explanations and `questions` for real unresolved uncertainty that should survive into a later answer pass.
+- Reach for `python <skill-directory>/scripts/apply_session_plan.py --help` only if the script changed or you need an uncommon path not covered here.
 - Prefer `overview` notes for role/intent, `flow` notes for control or data movement, `pitfall` notes for sharp edges, and `reference` notes for schemas or reusable facts.
 - Use open questions only for real uncertainty that should survive into a later answer pass.
 
