@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to `copanion` will be recorded here.
+## 0.1.3 - 2026-03-13
+### Fixes
+- Expose ordered question turns
+- Keep yanked question context focused
+- Add readonly thread viewer
+- Navigate inline annotation rows
+- Range changelog from previous tag
+- Preserve changelog history in release PRs
+
+
+
+### Other
+- Merge remote-tracking branch 'origin/master'
+
 ## 0.1.2 - 2026-03-13
 ### Chores
 - Enforce conventional commits and git-cliff changelog
