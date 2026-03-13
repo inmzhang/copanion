@@ -215,6 +215,43 @@ mod tests {
     }
 
     #[test]
+    fn apply_plan_preserves_user_follow_ups_when_appending_agent_replies() {
+        let mut packet = Packet::new("demo", "Demo", "/repo", vec![]);
+        let mut question = Question::new("src/main.rs", None, "Why is this empty?", None, vec![]);
+        question.add_message(QuestionMessageRole::Agent, "The branch is a placeholder.");
+        question.add_message(
+            QuestionMessageRole::User,
+            "What invariant depends on leaving it empty?",
+        );
+        let question_id = question.id.clone();
+        packet.questions.push(question);
+
+        let summary = apply_plan(
+            &mut packet,
+            Path::new("/repo"),
+            AgentResponsePlan {
+                answers: vec![AgentAnswer {
+                    question_id,
+                    answer: "The fast path assumes the branch never allocates.".to_string(),
+                }],
+                notes: vec![],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.answered_questions, 1);
+        assert_eq!(packet.questions[0].conversation.len(), 3);
+        assert_eq!(
+            packet.questions[0].conversation[1].body,
+            "What invariant depends on leaving it empty?"
+        );
+        assert_eq!(
+            packet.questions[0].conversation[2].role,
+            QuestionMessageRole::Agent
+        );
+    }
+
+    #[test]
     fn apply_plan_rejects_inverted_note_ranges() {
         let mut packet = Packet::new("demo", "Demo", "/repo", vec![]);
 

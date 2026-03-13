@@ -124,6 +124,19 @@ pub enum QuestionMessageRole {
     Agent,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum QuestionTurnKind {
+    Prompt,
+    UserFollowUp,
+    AgentReply,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QuestionTurnRef<'a> {
+    pub kind: QuestionTurnKind,
+    pub body: &'a str,
+}
+
 impl Packet {
     pub fn new(
         session_id: impl Into<String>,
@@ -239,6 +252,24 @@ impl Question {
     pub fn add_message(&mut self, role: QuestionMessageRole, body: impl Into<String>) {
         self.conversation.push(QuestionMessage::new(role, body));
         self.updated_at = Utc::now();
+    }
+
+    pub fn turn_count(&self) -> usize {
+        1 + self.conversation.len()
+    }
+
+    pub fn turns(&self) -> impl Iterator<Item = QuestionTurnRef<'_>> {
+        std::iter::once(QuestionTurnRef {
+            kind: QuestionTurnKind::Prompt,
+            body: self.prompt.as_str(),
+        })
+        .chain(self.conversation.iter().map(|message| QuestionTurnRef {
+            kind: match message.role {
+                QuestionMessageRole::User => QuestionTurnKind::UserFollowUp,
+                QuestionMessageRole::Agent => QuestionTurnKind::AgentReply,
+            },
+            body: message.body.as_str(),
+        }))
     }
 
     pub fn needs_agent_reply(&self) -> bool {
