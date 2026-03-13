@@ -29,7 +29,6 @@ pub enum InputMode {
     Visual,
     Draft,
     DraftConfirm,
-    ThreadView,
     FilePicker,
     Search,
     Help,
@@ -101,20 +100,21 @@ pub struct SearchState {
     pub selected: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct ThreadViewState {
-    pub question_index: usize,
-    pub scroll: usize,
+#[derive(Debug, Clone, Default)]
+pub struct ViewMetrics {
+    pub line_to_row: Vec<usize>,
+    pub annotation_rows: Vec<usize>,
+    pub rows: Vec<SourceRow>,
     pub total_rows: usize,
     pub viewport_height: usize,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ViewMetrics {
-    pub line_to_row: Vec<usize>,
-    pub annotation_lines: Vec<usize>,
-    pub total_rows: usize,
-    pub viewport_height: usize,
+#[derive(Debug, Clone)]
+pub enum SourceRow {
+    SourceLine { line_no: usize },
+    Note { index: usize, line_no: usize },
+    Question { index: usize, line_no: usize },
+    Footer { line_no: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -196,13 +196,13 @@ pub struct App {
     pub files: Vec<LoadedFile>,
     pub current_file: usize,
     pub cursor_line: usize,
+    pub source_cursor_row: usize,
     pub scroll: usize,
     pub focus: FocusPane,
     pub input_mode: InputMode,
     pub draft: Option<PromptDraft>,
     pub file_picker: Option<FilePickerState>,
     pub search: Option<SearchState>,
-    pub thread_view: Option<ThreadViewState>,
     pub visual_anchor: Option<usize>,
     pub view_metrics: ViewMetrics,
     pub browser_mode: BrowserMode,
@@ -253,13 +253,13 @@ impl App {
             files,
             current_file: 0,
             cursor_line: 1,
+            source_cursor_row: 0,
             scroll: 0,
             focus: FocusPane::Files,
             input_mode: InputMode::Normal,
             draft: None,
             file_picker: None,
             search: None,
-            thread_view: None,
             visual_anchor: None,
             view_metrics: ViewMetrics::default(),
             browser_mode: BrowserMode::Source,
@@ -322,7 +322,11 @@ impl App {
             if path.is_empty() {
                 return None;
             }
-            return Some((path.to_string(), self.cursor_line));
+            let line = self
+                .current_source_row()
+                .map(source_row_line)
+                .unwrap_or(self.cursor_line.max(1));
+            return Some((path.to_string(), line));
         }
 
         self.current_diff_row()
@@ -452,10 +456,56 @@ impl App {
         }
     }
 
-    fn current_annotation_line(&self) -> usize {
+    pub(crate) fn current_annotation_line(&self) -> usize {
         self.current_annotation_target()
             .map(|(_, line)| line)
             .unwrap_or(self.cursor_line)
+    }
+
+    fn current_source_row(&self) -> Option<&SourceRow> {
+        if self.is_diff_mode() {
+            return None;
+        }
+        self.view_metrics.rows.get(self.source_cursor_row)
+    }
+
+    fn sync_source_cursor_line_from_row(&mut self) {
+        if self.is_diff_mode() {
+            return;
+        }
+        self.cursor_line = self
+            .current_source_row()
+            .map(source_row_line)
+            .unwrap_or_else(|| {
+                self.source_cursor_row
+                    .saturating_add(1)
+                    .min(self.max_source_line())
+                    .max(1)
+            });
+    }
+
+    fn jump_to_source_annotation_match(&mut self, line: usize) {
+        if self.is_diff_mode() {
+            return;
+        }
+        let row =
+            self.view_metrics.rows.iter().enumerate().find_map(
+                |(row, source_row)| match source_row {
+                    SourceRow::Note { line_no, .. } | SourceRow::Question { line_no, .. }
+                        if *line_no == line =>
+                    {
+                        Some(row)
+                    }
+                    _ => None,
+                },
+            );
+        if let Some(row) = row {
+            self.source_cursor_row = row;
+            self.sync_source_cursor_line_from_row();
+        } else {
+            self.cursor_line = line.max(1);
+            self.source_cursor_row = usize::MAX;
+        }
     }
 
     pub fn toggle_focus(&mut self) {
@@ -480,9 +530,14 @@ impl App {
             return;
         }
         self.discard_guard = false;
-        let max_line = self.max_source_line();
-        let next = (self.cursor_line as isize + delta).clamp(1, max_line as isize) as usize;
-        self.cursor_line = next;
+        let max_row = if self.view_metrics.total_rows == 0 {
+            self.max_source_line().saturating_sub(1)
+        } else {
+            self.view_metrics.total_rows.saturating_sub(1)
+        } as isize;
+        self.source_cursor_row =
+            (self.source_cursor_row as isize + delta).clamp(0, max_row) as usize;
+        self.sync_source_cursor_line_from_row();
         self.ensure_cursor_visible();
     }
 
@@ -492,7 +547,8 @@ impl App {
             return;
         }
         self.discard_guard = false;
-        self.cursor_line = 1;
+        self.source_cursor_row = 0;
+        self.sync_source_cursor_line_from_row();
         self.ensure_cursor_visible();
     }
 
@@ -502,7 +558,12 @@ impl App {
             return;
         }
         self.discard_guard = false;
-        self.cursor_line = self.max_source_line();
+        self.source_cursor_row = if self.view_metrics.total_rows == 0 {
+            self.max_source_line().saturating_sub(1)
+        } else {
+            self.view_metrics.total_rows.saturating_sub(1)
+        };
+        self.sync_source_cursor_line_from_row();
         self.ensure_cursor_visible();
     }
 
@@ -553,6 +614,7 @@ impl App {
             return;
         }
         self.current_file = index.min(self.files.len().saturating_sub(1));
+        self.source_cursor_row = 0;
         self.cursor_line = 1;
         self.scroll = 0;
         self.ensure_cursor_visible();
@@ -564,15 +626,16 @@ impl App {
             return;
         }
         self.discard_guard = false;
-        if let Some(line) = self
+        if let Some(row) = self
             .view_metrics
-            .annotation_lines
+            .annotation_rows
             .iter()
             .copied()
-            .find(|line| *line > self.cursor_line)
-            .or_else(|| self.view_metrics.annotation_lines.first().copied())
+            .find(|row| *row > self.source_cursor_row)
+            .or_else(|| self.view_metrics.annotation_rows.first().copied())
         {
-            self.cursor_line = line;
+            self.source_cursor_row = row;
+            self.sync_source_cursor_line_from_row();
             self.ensure_cursor_visible();
         }
     }
@@ -583,16 +646,17 @@ impl App {
             return;
         }
         self.discard_guard = false;
-        if let Some(line) = self
+        if let Some(row) = self
             .view_metrics
-            .annotation_lines
+            .annotation_rows
             .iter()
             .copied()
             .rev()
-            .find(|line| *line < self.cursor_line)
-            .or_else(|| self.view_metrics.annotation_lines.last().copied())
+            .find(|row| *row < self.source_cursor_row)
+            .or_else(|| self.view_metrics.annotation_rows.last().copied())
         {
-            self.cursor_line = line;
+            self.source_cursor_row = row;
+            self.sync_source_cursor_line_from_row();
             self.ensure_cursor_visible();
         }
     }
@@ -690,7 +754,7 @@ impl App {
         self.discard_guard = false;
         self.focus = FocusPane::Source;
         self.input_mode = InputMode::Visual;
-        self.visual_anchor = Some(self.cursor_line);
+        self.visual_anchor = Some(self.current_annotation_line());
         self.message =
             Some("visual selection started; move the cursor and press a or n".to_string());
     }
@@ -712,7 +776,7 @@ impl App {
             return self.diff_visual_selection().map(|(_, anchor)| anchor);
         }
         let anchor = self.visual_anchor?;
-        Some(anchor_from_lines(anchor, self.cursor_line))
+        Some(anchor_from_lines(anchor, self.current_annotation_line()))
     }
 
     pub fn is_line_in_visual_selection(&self, line: usize) -> bool {
@@ -950,6 +1014,7 @@ impl App {
         if let Some(index) = self.files.iter().position(|file| file.path == path) {
             self.current_file = index;
         }
+        self.source_cursor_row = 0;
         self.cursor_line = 1;
         self.scroll = 0;
         self.focus = FocusPane::Source;
@@ -1109,6 +1174,7 @@ impl App {
             return false;
         }
 
+        let same_file = self.current_path() == selection.path;
         if let Some(index) = self
             .files
             .iter()
@@ -1125,7 +1191,13 @@ impl App {
 
         self.focus = FocusPane::Source;
         self.input_mode = InputMode::Normal;
-        self.cursor_line = selection.line.max(1);
+        if same_file {
+            self.jump_to_source_annotation_match(selection.line.max(1));
+        } else {
+            self.cursor_line = selection.line.max(1);
+            self.source_cursor_row = usize::MAX;
+            self.scroll = 0;
+        }
         self.ensure_cursor_visible();
         self.message = Some(format!("jumped to {}:{}", selection.path, selection.line));
         true
@@ -1445,6 +1517,7 @@ impl App {
         if self.current_file >= self.files.len() {
             self.current_file = self.files.len().saturating_sub(1);
         }
+        self.source_cursor_row = 0;
         self.cursor_line = 1;
         self.scroll = 0;
         self.ensure_cursor_visible();
@@ -1619,7 +1692,7 @@ impl App {
         if self.current_file >= self.files.len() {
             self.current_file = self.files.len().saturating_sub(1);
         }
-        self.cursor_line = self.cursor_line.min(self.max_source_line()).max(1);
+        self.sync_source_cursor_line_from_row();
         self.ensure_cursor_visible();
         self.message = Some("reloaded tracked source files".to_string());
         Ok(())
@@ -1631,6 +1704,18 @@ impl App {
         }
         metrics.viewport_height = metrics.viewport_height.max(1);
         self.view_metrics = metrics;
+        let max_row = self.view_metrics.total_rows.saturating_sub(1);
+        if self.source_cursor_row > max_row {
+            self.source_cursor_row = self
+                .view_metrics
+                .line_to_row
+                .get(self.cursor_line.saturating_sub(1))
+                .copied()
+                .unwrap_or(max_row);
+        } else {
+            self.source_cursor_row = self.source_cursor_row.min(max_row);
+        }
+        self.sync_source_cursor_line_from_row();
         self.ensure_cursor_visible();
     }
 
@@ -1690,119 +1775,6 @@ impl App {
             .and_then(|index| self.packet.questions.get(index))
     }
 
-    pub fn active_thread_view_question(&self) -> Option<&Question> {
-        self.thread_view
-            .as_ref()
-            .and_then(|view| self.packet.questions.get(view.question_index))
-    }
-
-    pub fn open_current_thread_viewer(&mut self) -> bool {
-        let Some(index) = self.current_question_index() else {
-            self.message = Some(if self.is_diff_mode() {
-                "there is no comment thread on the current line".to_string()
-            } else {
-                "there is no question thread on the current line".to_string()
-            });
-            return false;
-        };
-        self.thread_view = Some(ThreadViewState {
-            question_index: index,
-            scroll: usize::MAX,
-            total_rows: 0,
-            viewport_height: 1,
-        });
-        self.input_mode = InputMode::ThreadView;
-        self.message = Some(if self.is_diff_mode() {
-            "readonly comment thread view; j/k scroll, Esc closes".to_string()
-        } else {
-            "readonly question thread view; j/k scroll, Esc closes".to_string()
-        });
-        true
-    }
-
-    pub fn close_thread_viewer(&mut self) {
-        self.thread_view = None;
-        self.input_mode = InputMode::Normal;
-        self.message = Some(if self.is_diff_mode() {
-            "closed the comment thread view".to_string()
-        } else {
-            "closed the question thread view".to_string()
-        });
-    }
-
-    pub fn update_thread_view_metrics(&mut self, total_rows: usize, viewport_height: usize) {
-        let Some(view) = &mut self.thread_view else {
-            return;
-        };
-        view.total_rows = total_rows;
-        view.viewport_height = viewport_height.max(1);
-        let max_scroll = view.total_rows.saturating_sub(view.viewport_height);
-        view.scroll = view.scroll.min(max_scroll);
-    }
-
-    pub fn thread_view_scroll(&self) -> usize {
-        self.thread_view
-            .as_ref()
-            .map(|view| view.scroll)
-            .unwrap_or(0)
-    }
-
-    pub fn scroll_thread_view(&mut self, delta: isize) {
-        let Some(view) = &mut self.thread_view else {
-            return;
-        };
-        let max_scroll = view.total_rows.saturating_sub(view.viewport_height) as isize;
-        view.scroll = (view.scroll as isize + delta).clamp(0, max_scroll) as usize;
-    }
-
-    pub fn page_thread_view_down(&mut self) {
-        let step = self
-            .thread_view
-            .as_ref()
-            .map(|view| view.viewport_height.max(1))
-            .unwrap_or(1);
-        self.scroll_thread_view(step as isize);
-    }
-
-    pub fn page_thread_view_up(&mut self) {
-        let step = self
-            .thread_view
-            .as_ref()
-            .map(|view| view.viewport_height.max(1))
-            .unwrap_or(1);
-        self.scroll_thread_view(-(step as isize));
-    }
-
-    pub fn half_page_thread_view_down(&mut self) {
-        let step = self
-            .thread_view
-            .as_ref()
-            .map(|view| (view.viewport_height / 2).max(1))
-            .unwrap_or(1);
-        self.scroll_thread_view(step as isize);
-    }
-
-    pub fn half_page_thread_view_up(&mut self) {
-        let step = self
-            .thread_view
-            .as_ref()
-            .map(|view| (view.viewport_height / 2).max(1))
-            .unwrap_or(1);
-        self.scroll_thread_view(-(step as isize));
-    }
-
-    pub fn thread_view_to_top(&mut self) {
-        if let Some(view) = &mut self.thread_view {
-            view.scroll = 0;
-        }
-    }
-
-    pub fn thread_view_to_bottom(&mut self) {
-        if let Some(view) = &mut self.thread_view {
-            view.scroll = view.total_rows.saturating_sub(view.viewport_height);
-        }
-    }
-
     pub fn notes_for_current_line(&self) -> Vec<&Note> {
         let Some((path, line)) = self.current_annotation_target() else {
             return Vec::new();
@@ -1831,6 +1803,11 @@ impl App {
     }
 
     fn current_note_index(&self) -> Option<usize> {
+        if !self.is_diff_mode()
+            && let Some(SourceRow::Note { index, .. }) = self.current_source_row()
+        {
+            return Some(*index);
+        }
         let (path, line) = self.current_annotation_target()?;
         self.packet
             .notes
@@ -1839,6 +1816,11 @@ impl App {
     }
 
     fn current_question_index(&self) -> Option<usize> {
+        if !self.is_diff_mode()
+            && let Some(SourceRow::Question { index, .. }) = self.current_source_row()
+        {
+            return Some(*index);
+        }
         let (path, line) = self.current_annotation_target()?;
         self.packet
             .questions
@@ -1864,6 +1846,16 @@ impl App {
     }
 
     fn current_open_question_index(&self) -> Option<usize> {
+        if !self.is_diff_mode()
+            && let Some(SourceRow::Question { index, .. }) = self.current_source_row()
+        {
+            return self
+                .packet
+                .questions
+                .get(*index)
+                .filter(|question| question.status == QuestionStatus::Open)
+                .map(|_| *index);
+        }
         let (path, line) = self.current_annotation_target()?;
         self.packet.questions.iter().rposition(|question| {
             question.path == path
@@ -1889,13 +1881,9 @@ impl App {
             self.scroll = 0;
             return;
         }
-
-        let line_index = self.cursor_line.saturating_sub(1);
-        let row = *self
-            .view_metrics
-            .line_to_row
-            .get(line_index)
-            .unwrap_or_else(|| self.view_metrics.line_to_row.last().unwrap_or(&0));
+        let row = self
+            .source_cursor_row
+            .min(self.view_metrics.total_rows.saturating_sub(1));
 
         let viewport_height = self.view_metrics.viewport_height.max(1);
         if row < self.scroll {
@@ -2558,6 +2546,15 @@ fn note_covers_line(note: &Note, line: usize) -> bool {
     anchor_contains_line(note.anchor, line)
 }
 
+fn source_row_line(row: &SourceRow) -> usize {
+    match row {
+        SourceRow::SourceLine { line_no }
+        | SourceRow::Note { line_no, .. }
+        | SourceRow::Question { line_no, .. }
+        | SourceRow::Footer { line_no } => *line_no,
+    }
+}
+
 fn question_covers_line(question: &Question, line: usize) -> bool {
     let Some(anchor) = question.anchor else {
         return false;
@@ -3042,46 +3039,6 @@ mod tests {
     }
 
     #[test]
-    fn can_open_question_in_readonly_thread_view() {
-        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
-            let mut question = Question::new(
-                "main.rs",
-                Some(Anchor::new(2, None)),
-                "Why is this separate?",
-                None,
-                vec![],
-            );
-            question.add_message(
-                crate::model::QuestionMessageRole::Agent,
-                "It separates setup from the hot path.",
-            );
-            question.add_message(
-                crate::model::QuestionMessageRole::User,
-                "What invariant depends on that split?",
-            );
-            packet.questions.push(question);
-        });
-        app.cursor_line = 2;
-
-        assert!(app.open_current_thread_viewer());
-        assert_eq!(app.input_mode, InputMode::ThreadView);
-        assert_eq!(
-            app.active_thread_view_question()
-                .map(|question| question.prompt.as_str()),
-            Some("Why is this separate?")
-        );
-
-        app.update_thread_view_metrics(20, 6);
-        assert_eq!(app.thread_view_scroll(), 14);
-        app.scroll_thread_view(-3);
-        assert_eq!(app.thread_view_scroll(), 11);
-
-        app.close_thread_viewer();
-        assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.thread_view.is_none());
-    }
-
-    #[test]
     fn editing_question_targets_latest_user_follow_up() {
         let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
             let mut question = Question::new(
@@ -3224,19 +3181,69 @@ mod tests {
     #[test]
     fn next_annotation_wraps_back_to_the_head() {
         let (_temp, mut app) = single_file_app("one\ntwo\nthree\nfour\n", |_| {});
-        app.view_metrics.annotation_lines = vec![2, 4];
-        app.cursor_line = 4;
+        app.view_metrics.annotation_rows = vec![2, 4];
+        app.source_cursor_row = 4;
+        app.sync_source_cursor_line_from_row();
         app.jump_to_next_annotation();
-        assert_eq!(app.cursor_line, 2);
+        assert_eq!(app.source_cursor_row, 2);
     }
 
     #[test]
     fn previous_annotation_wraps_back_to_the_tail() {
         let (_temp, mut app) = single_file_app("one\ntwo\nthree\nfour\n", |_| {});
-        app.view_metrics.annotation_lines = vec![2, 4];
-        app.cursor_line = 2;
+        app.view_metrics.annotation_rows = vec![2, 4];
+        app.source_cursor_row = 2;
+        app.sync_source_cursor_line_from_row();
         app.jump_to_previous_annotation();
-        assert_eq!(app.cursor_line, 4);
+        assert_eq!(app.source_cursor_row, 4);
+    }
+
+    #[test]
+    fn source_cursor_can_step_into_virtual_annotation_rows() {
+        let (_temp, mut app) = single_file_app("one\ntwo\nthree\n", |packet| {
+            packet.notes.push(Note::new(
+                "main.rs",
+                Anchor::new(2, None),
+                NoteKind::Overview,
+                "inline note",
+                "This is attached between line 2 and 3.",
+                vec![],
+                None,
+                NoteSource::Agent,
+            ));
+        });
+        app.update_view_metrics(crate::tui::app::ViewMetrics {
+            line_to_row: vec![0, 1, 5],
+            annotation_rows: vec![2],
+            rows: vec![
+                crate::tui::app::SourceRow::SourceLine { line_no: 1 },
+                crate::tui::app::SourceRow::SourceLine { line_no: 2 },
+                crate::tui::app::SourceRow::Note {
+                    index: 0,
+                    line_no: 2,
+                },
+                crate::tui::app::SourceRow::Note {
+                    index: 0,
+                    line_no: 2,
+                },
+                crate::tui::app::SourceRow::Note {
+                    index: 0,
+                    line_no: 2,
+                },
+                crate::tui::app::SourceRow::SourceLine { line_no: 3 },
+            ],
+            total_rows: 6,
+            viewport_height: 3,
+        });
+
+        app.go_to_first_line();
+        app.move_cursor(1);
+        assert_eq!(app.source_cursor_row, 1);
+        assert_eq!(app.cursor_line, 2);
+
+        app.move_cursor(1);
+        assert_eq!(app.source_cursor_row, 2);
+        assert_eq!(app.cursor_line, 2);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::theme::{self, Theme};
 
 use super::app::{
     App, DiffRow, DiffViewMetrics, DraftKind, DraftTarget, FilePickerState, FocusPane, InputMode,
-    PromptDraft, ViewMetrics,
+    PromptDraft, SourceRow, ViewMetrics,
 };
 
 #[derive(Clone, Copy)]
@@ -59,7 +59,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             render_draft(frame, app, sections[1]);
             render_draft_confirm(frame, sections[1]);
         }
-        InputMode::ThreadView => render_thread_view(frame, app, sections[1]),
         InputMode::FilePicker => render_file_picker(frame, app, sections[1]),
         InputMode::Search => render_search(frame, app, sections[1]),
         InputMode::Normal | InputMode::Visual | InputMode::CommitSelect => {}
@@ -483,14 +482,14 @@ fn render_diff_status(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::CommitSelect => "j/k move  Space toggle range  Enter open diff  q quit",
         InputMode::Help => "q or Esc closes help",
         InputMode::Normal if app.current_open_question().is_some() => {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space view thread  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  Esc/m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  c close  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Normal
             if app
                 .current_question()
                 .is_some_and(|question| question.status != QuestionStatus::Open) =>
         {
-            "Tab focus  j/k move  [] jump  v select  Enter/Space view thread  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  Esc/m commits"
+            "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  o reopen  n note  i edit  / search  r review+next  Esc/m commits"
         }
         InputMode::Normal => {
             "Tab focus  j/k move  [] jump  v select  Enter/Space context  dd delete  a comment or reply  n note  i edit  / search  r review+next  Esc/m commits"
@@ -498,9 +497,6 @@ fn render_diff_status(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::Visual => "j/k move  a comment  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
         InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
-        InputMode::ThreadView => {
-            "j/k scroll  Ctrl-U/Ctrl-D half-page  PageUp/PageDown page  Enter/Esc close"
-        }
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
         InputMode::Search => {
             "Type to fuzzy-search review notes and comment threads  Enter jump  j/k move  Esc cancel"
@@ -548,24 +544,21 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_default();
     let hints = match app.input_mode {
         InputMode::Normal if app.current_open_question().is_some() => {
-            "Tab focus  j/k move  [] jump  Enter/Space view  v select  dd delete  a ask or continue  c close  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  c close  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Normal
             if app
                 .current_question()
                 .is_some_and(|question| question.status != QuestionStatus::Open) =>
         {
-            "Tab focus  j/k move  [] jump  Enter/Space view  v select  dd delete  a ask or continue  o reopen  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  o reopen  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Normal => {
-            "Tab focus  j/k move  [] jump  Enter/Space view  v select  dd delete  a ask or continue  R reload  n note  i edit  f add file  / search"
+            "Tab focus  j/k move  [] jump  v select  dd delete  a ask or continue  R reload  n note  i edit  f add file  / search"
         }
         InputMode::Visual => "j/k move  a question  n note  Esc cancel  v finish selection",
         InputMode::Draft => "Type the draft  Ctrl-S save  Ctrl-O edit in $EDITOR  Esc close",
         InputMode::DraftConfirm => "Save this draft before closing? y yes  n no  Esc back",
-        InputMode::ThreadView => {
-            "j/k scroll  Ctrl-U/Ctrl-D half-page  PageUp/PageDown page  Enter/Esc close"
-        }
         InputMode::FilePicker => "Type to fuzzy-search files  Enter add  j/k move  Esc cancel",
         InputMode::Search => {
             "Type to fuzzy-search notes and questions  Enter jump  j/k move  Esc cancel"
@@ -580,8 +573,13 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_default();
     let badge_text = format!(" {focus} ");
     let meta_text = format!(
-        "line {}{}  {}  {} attached notes{}",
-        app.cursor_line, selection, dirty, current_notes, current_thread
+        "line {}  row {}{}  {}  {} attached notes{}",
+        app.current_annotation_line(),
+        app.source_cursor_row + 1,
+        selection,
+        dirty,
+        current_notes,
+        current_thread
     );
     let status = fit_status_segments(&badge_text, &meta_text, message, area.width as usize);
     let line = Line::from(vec![
@@ -703,17 +701,16 @@ fn render_help(frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
         help_line("Tab", "toggle focus between the sidebar and the main view"),
-        help_line("j / k", "move through the selected pane"),
+        help_line(
+            "j / k",
+            "move through the selected pane, including annotation rows",
+        ),
         help_line("h / l", "switch files from the source pane"),
         help_line("[ / ]", "jump to the previous or next note or thread"),
         help_line("PageUp / PageDown", "move by one viewport"),
         help_line("Ctrl-U / Ctrl-D", "move by half a viewport"),
         help_line("v / V", "start a visual selection on anchorable lines"),
         help_line("a", "open or continue the thread under the cursor"),
-        help_line(
-            "Enter / Space",
-            "open the thread under the cursor in a readonly viewer",
-        ),
         help_line("c", "close the open thread under the cursor"),
         help_line("o", "reopen the closed thread under the cursor"),
         help_line("n", "open a NOTE draft at the cursor or selected range"),
@@ -903,96 +900,6 @@ fn render_draft_confirm(frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_thread_view(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(question) = app.active_thread_view_question() else {
-        return;
-    };
-    let popup = centered_rect(area, 84, 82);
-    frame.render_widget(Clear, popup);
-    let (border_color, _) = question_status_style(question.status);
-    let block = Block::default()
-        .title(if app.is_diff_mode() {
-            " Comment Thread "
-        } else {
-            " Question Thread "
-        })
-        .borders(Borders::ALL)
-        .style(Style::default().bg(theme().panel).fg(theme().text))
-        .border_style(Style::default().fg(border_color));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let anchor = question
-        .anchor
-        .map(|anchor| anchor.to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let summary = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("File: ", Style::default().fg(theme().muted)),
-            Span::styled(question.path.as_str(), Style::default().fg(theme().text)),
-            Span::raw("  "),
-            Span::styled("Anchor: ", Style::default().fg(theme().muted)),
-            Span::styled(anchor, Style::default().fg(theme().text)),
-        ]),
-        Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(theme().muted)),
-            Span::styled(
-                question_status_label(question.status),
-                Style::default().fg(theme().accent),
-            ),
-            Span::raw("  "),
-            Span::styled("Turns: ", Style::default().fg(theme().muted)),
-            Span::styled(
-                question.turn_count().to_string(),
-                Style::default().fg(theme().text),
-            ),
-        ]),
-    ])
-    .style(Style::default().bg(theme().panel));
-    frame.render_widget(summary, sections[0]);
-
-    let lines = render_question_thread(
-        question,
-        sections[1].width.max(20) as usize,
-        app.is_diff_mode(),
-        false,
-    );
-    app.update_thread_view_metrics(lines.len(), sections[1].height as usize);
-    let visible = lines
-        .into_iter()
-        .skip(app.thread_view_scroll())
-        .take(sections[1].height as usize)
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(visible).style(Style::default().bg(theme().panel)),
-        sections[1],
-    );
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("j/k", Style::default().fg(theme().accent)),
-            Span::raw(" scroll  "),
-            Span::styled("Ctrl-U/D", Style::default().fg(theme().accent)),
-            Span::raw(" half-page  "),
-            Span::styled("PgUp/PgDn", Style::default().fg(theme().accent)),
-            Span::raw(" page  "),
-            Span::styled("Enter/Esc", Style::default().fg(theme().danger)),
-            Span::raw(" close"),
-        ]))
-        .style(Style::default().bg(theme().panel)),
-        sections[2],
-    );
-}
-
 fn render_file_picker(frame: &mut Frame, app: &mut App, area: Rect) {
     let popup = centered_rect(area, 74, 72);
     frame.render_widget(Clear, popup);
@@ -1148,19 +1055,22 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             lines,
             ViewMetrics {
                 line_to_row: vec![0],
-                annotation_lines: Vec::new(),
+                annotation_rows: Vec::new(),
+                rows: vec![
+                    SourceRow::SourceLine { line_no: 1 },
+                    SourceRow::Footer { line_no: 1 },
+                ],
                 total_rows: 2,
                 viewport_height: 1,
             },
         );
     }
 
-    let notes = app.notes_for_path(&file.path);
-    let questions = app.questions_for_path(&file.path);
     let digits = file.lines.len().max(1).to_string().len();
     let mut rendered = Vec::new();
     let mut line_to_row = Vec::new();
-    let mut annotation_lines = Vec::new();
+    let mut annotation_rows = Vec::new();
+    let mut rows = Vec::new();
     let source_line_count = file.lines.len().max(1);
 
     for line_no in 1..=source_line_count {
@@ -1169,34 +1079,44 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             .get(line_no.saturating_sub(1))
             .cloned()
             .unwrap_or_default();
-        let source_notes = notes
+        let source_notes = app
+            .packet
+            .notes
             .iter()
-            .copied()
-            .filter(|note| super::app::anchor_display_line(note.anchor) == line_no)
+            .enumerate()
+            .filter(|(_, note)| note.path == file.path)
+            .filter(|(_, note)| super::app::anchor_display_line(note.anchor) == line_no)
             .collect::<Vec<_>>();
-        let source_questions = questions
+        let source_questions = app
+            .packet
+            .questions
             .iter()
-            .copied()
-            .filter(|question| {
+            .enumerate()
+            .filter(|(_, question)| question.path == file.path)
+            .filter(|(_, question)| {
                 question.anchor.map(super::app::anchor_display_line) == Some(line_no)
             })
             .collect::<Vec<_>>();
-        let line_has_note = notes
+        let line_has_note = app
+            .packet
+            .notes
             .iter()
-            .copied()
+            .filter(|note| note.path == file.path)
             .any(|note| super::app::anchor_contains_line(note.anchor, line_no));
-        let line_has_question = questions.iter().copied().any(|question| {
-            question
-                .anchor
-                .map(|anchor| super::app::anchor_contains_line(anchor, line_no))
-                .unwrap_or(false)
-        });
+        let line_has_question = app
+            .packet
+            .questions
+            .iter()
+            .filter(|question| question.path == file.path)
+            .any(|question| {
+                question
+                    .anchor
+                    .map(|anchor| super::app::anchor_contains_line(anchor, line_no))
+                    .unwrap_or(false)
+            });
         let in_visual_selection = app.is_line_in_visual_selection(line_no);
 
         line_to_row.push(rendered.len());
-        if !source_notes.is_empty() || !source_questions.is_empty() {
-            annotation_lines.push(line_no);
-        }
         let highlighted = file.highlighted_lines.get(line_no.saturating_sub(1));
         rendered.push(render_source_line(
             line_no,
@@ -1204,36 +1124,68 @@ fn build_source_lines(app: &App, width: usize) -> (Vec<Line<'static>>, ViewMetri
             highlighted,
             SourceLineState {
                 digits,
-                selected: line_no == app.cursor_line,
+                selected: rendered.len() == app.source_cursor_row,
                 has_note: line_has_note,
                 has_question: line_has_question,
                 in_visual_selection,
             },
         ));
+        rows.push(SourceRow::SourceLine { line_no });
 
-        for note in source_notes {
-            rendered.extend(render_note_card(note, width));
+        for (index, note) in source_notes {
+            let start_row = rendered.len();
+            let mut card = render_note_card(note, width);
+            highlight_source_annotation_row(
+                &mut card,
+                start_row,
+                app.source_cursor_row,
+                theme().cursor_line,
+            );
+            annotation_rows.push(start_row);
+            let row_count = card.len();
+            rendered.extend(card);
+            rows.extend((0..row_count).map(|_| SourceRow::Note { index, line_no }));
         }
-        for question in source_questions {
-            rendered.extend(render_question_card(question, width, false));
+        for (index, question) in source_questions {
+            let start_row = rendered.len();
+            let mut card = render_question_card(question, width, false);
+            highlight_source_annotation_row(
+                &mut card,
+                start_row,
+                app.source_cursor_row,
+                theme().cursor_line,
+            );
+            annotation_rows.push(start_row);
+            let row_count = card.len();
+            rendered.extend(card);
+            rows.extend((0..row_count).map(|_| SourceRow::Question { index, line_no }));
         }
     }
 
+    let footer_bg = if rendered.len() == app.source_cursor_row {
+        theme().cursor_line
+    } else {
+        theme().panel
+    };
     rendered.push(Line::from(vec![Span::styled(
         format!(
             "─ end of {} ─ {} annotations attached",
             file.path,
-            annotation_lines.len()
+            annotation_rows.len()
         ),
-        Style::default().fg(theme().muted),
+        Style::default().fg(theme().muted).bg(footer_bg),
     )]));
+    rows.push(SourceRow::Footer {
+        line_no: source_line_count,
+    });
 
     let total_rows = rendered.len();
     (
         rendered,
         ViewMetrics {
             line_to_row,
-            annotation_lines,
+            annotation_rows,
+            rows,
             total_rows,
             viewport_height: 1,
         },
@@ -1527,6 +1479,23 @@ fn render_source_line(
     }
 
     Line::from(spans)
+}
+
+fn highlight_source_annotation_row(
+    lines: &mut [Line<'static>],
+    start_row: usize,
+    selected_row: usize,
+    background: Color,
+) {
+    let Some(local_index) = selected_row.checked_sub(start_row) else {
+        return;
+    };
+    let Some(line) = lines.get_mut(local_index) else {
+        return;
+    };
+    for span in &mut line.spans {
+        span.style = span.style.bg(background);
+    }
 }
 
 fn render_diff_file_header(
@@ -2295,13 +2264,6 @@ fn status_mode_label(app: &App) -> String {
                 DraftKind::Note => "note".to_string(),
             })
             .unwrap_or_else(|| "draft".to_string()),
-        InputMode::ThreadView => {
-            if app.is_diff_mode() {
-                "thread".to_string()
-            } else {
-                "question".to_string()
-            }
-        }
         InputMode::FilePicker => "files".to_string(),
         InputMode::Search => "search".to_string(),
         InputMode::Help => "help".to_string(),
@@ -2359,7 +2321,8 @@ mod tests {
             .join("\n");
         assert!(rendered.contains("entry"));
         assert!(rendered.contains("why empty?"));
-        assert_eq!(metrics.annotation_lines, vec![1]);
+        assert_eq!(metrics.annotation_rows.len(), 2);
+        assert_eq!(metrics.annotation_rows[0], 1);
     }
 
     #[test]
@@ -2422,6 +2385,6 @@ mod tests {
         ));
         let app = App::load(root.path().join("packet.toml"), packet, false).unwrap();
         let (_, metrics) = build_source_lines(&app, 80);
-        assert_eq!(metrics.annotation_lines, vec![3]);
+        assert_eq!(metrics.annotation_rows, vec![3]);
     }
 }

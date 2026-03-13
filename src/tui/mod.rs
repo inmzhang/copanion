@@ -172,7 +172,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::Visual => handle_visual_mode(app, key),
         InputMode::Draft => handle_draft_mode(app, key),
         InputMode::DraftConfirm => handle_draft_confirm_mode(app, key),
-        InputMode::ThreadView => handle_thread_view_mode(app, key),
         InputMode::FilePicker => handle_file_picker_mode(app, key),
         InputMode::Search => handle_search_mode(app, key),
         InputMode::Help => handle_help_mode(app, key),
@@ -204,9 +203,7 @@ fn handle_diff_normal_mode(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Esc => app.reopen_diff_commit_selector()?,
         KeyCode::Enter | KeyCode::Char(' ') if app.focus == FocusPane::Source => {
-            if !app.open_current_thread_viewer() {
-                app.toggle_diff_gap_at_cursor()?;
-            }
+            app.toggle_diff_gap_at_cursor()?
         }
         KeyCode::Char('m') => app.reopen_diff_commit_selector()?,
         KeyCode::Char('r') => app.mark_current_diff_file_reviewed_and_next(),
@@ -271,9 +268,6 @@ fn handle_shared_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('h') | KeyCode::Left if app.focus == FocusPane::Source => app.move_file(-1),
         KeyCode::Char('l') | KeyCode::Right if app.focus == FocusPane::Source => app.move_file(1),
         KeyCode::Enter if app.focus == FocusPane::Files => app.focus = FocusPane::Source,
-        KeyCode::Enter | KeyCode::Char(' ') if app.focus == FocusPane::Source => {
-            app.open_current_thread_viewer();
-        }
         KeyCode::Char('g') => app.go_to_first_line(),
         KeyCode::Char('G') => app.go_to_last_line(),
         KeyCode::Char('[') => app.jump_to_previous_annotation(),
@@ -300,28 +294,6 @@ fn handle_shared_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         _ => return Ok(false),
     }
     Ok(true)
-}
-
-fn handle_thread_view_mode(app: &mut App, key: KeyEvent) -> Result<()> {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Char(' ') => {
-            app.close_thread_viewer()
-        }
-        KeyCode::Char('j') | KeyCode::Down => app.scroll_thread_view(1),
-        KeyCode::Char('k') | KeyCode::Up => app.scroll_thread_view(-1),
-        KeyCode::Char('g') => app.thread_view_to_top(),
-        KeyCode::Char('G') => app.thread_view_to_bottom(),
-        KeyCode::PageDown => app.page_thread_view_down(),
-        KeyCode::PageUp => app.page_thread_view_up(),
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.half_page_thread_view_down()
-        }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.half_page_thread_view_up()
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 fn handle_draft_mode(app: &mut App, key: KeyEvent) -> Result<()> {
