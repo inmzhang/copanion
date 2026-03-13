@@ -1,14 +1,27 @@
 # Changelog
 
 All notable changes to `copanion` will be recorded here.
-## Unreleased
+## 0.1.1 - 2026-03-13
 ### Chores
 - Enforce conventional commits and git-cliff changelog
+- Use compilerla conventional pre-commit
+
+
+
+### Ci
+- Require manual release dispatch
 
 
 
 ### Docs
 - Inline copanion helper usage
+
+
+
+### Other
+- Revert "ci(release): require manual release dispatch"
+
+This reverts commit 13a44af56113a7772c6f85ea718726818296547f.
 
 ## 0.1.0 - 2026-03-12
 ### Chores
