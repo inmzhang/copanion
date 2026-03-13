@@ -1,6 +1,6 @@
 [package]
 name = "copanion"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.88"
 description = "A Rust CLI/TUI for attaching learning notes to source files and exporting structured follow-up questions for coding agents."
