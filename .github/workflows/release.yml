@@ -76,7 +76,7 @@ jobs:
           PREV_TAG="v${{ steps.current.outputs.version }}"
           NEXT_TAG="v${{ steps.new.outputs.version }}"
           if git rev-parse -q --verify "refs/tags/$PREV_TAG" >/dev/null; then
-            git-cliff "$PREV_TAG..HEAD" --tag "$NEXT_TAG" --output CHANGELOG.md
+            git-cliff "$PREV_TAG..HEAD" --tag "$NEXT_TAG" --prepend CHANGELOG.md
           else
             git-cliff --tag "$NEXT_TAG" --output CHANGELOG.md
           fi
